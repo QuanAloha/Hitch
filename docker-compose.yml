@@ -1,0 +1,56 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://hitch:${POSTGRES_PASSWORD:-hitch_dev_password}@db:5432/${POSTGRES_DB:-hitch}
+      VALHALLA_URL: http://valhalla:8002
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      valhalla:
+        condition: service_started
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hitch}
+      POSTGRES_USER: ${POSTGRES_USER:-hitch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hitch_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hitch} -d ${POSTGRES_DB:-hitch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    environment:
+      tile_urls: https://download.geofabrik.de/north-america/us/utah-latest.osm.pbf
+      server_threads: 2
+    ports:
+      - "8002:8002"
+    volumes:
+      - valhalla_data:/custom_files
+
+volumes:
+  frontend_node_modules:
+  postgres_data:
+  valhalla_data:
