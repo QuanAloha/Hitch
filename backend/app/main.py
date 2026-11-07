@@ -20,6 +20,19 @@ app.add_middleware(
 )
 
 
+
+class RouteRequest(BaseModel):
+    locations: list[dict] = Field(
+        min_length=2,
+        examples=[
+            [
+                {"lat": 40.7608, "lon": -111.891},
+                {"lat": 40.2338, "lon": -111.6585},
+            ]
+        ],
+    )
+    costing: str = "auto"
+
 @app.post("/route")
 async def get_route(request: RouteRequest):
     payload = {
