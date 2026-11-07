@@ -2,6 +2,14 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './style.css'
 
+const ThemeContext = React.createContext(null)
+
+function ThemeToggle() {
+  const { theme, toggleTheme } = React.useContext(ThemeContext)
+  const isDark = theme === 'dark'
+  return <button type="button" className="theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${isDark ? 'light' : 'dark'} mode`} title={`Switch to ${isDark ? 'light' : 'dark'} mode`}><span aria-hidden="true">{isDark ? '☀' : '☾'}</span><small>{isDark ? 'Light' : 'Dark'}</small></button>
+}
+
 const shipperOrders = [
   { id: 'ORD-4821', customer: 'Mia Chen', item: 'Bakery order', detail: '2 insulated boxes · 8 lb', from: 'Sugar House', to: 'Downtown Salt Lake City', pickup: '10:30–11:00 AM', pickupMinutes: 630, driver: 'Jordan Lee', run: 'Pickup run 204', status: 'Have ready by 10:30 AM', tone: 'ready', channel: 'Facebook Marketplace' },
   { id: 'ORD-4820', customer: 'Oliver Grant', item: 'Ceramic tableware', detail: '1 fragile parcel · 12 lb', from: 'Sugar House', to: 'The Avenues, Salt Lake City', pickup: '10:30–11:00 AM', pickupMinutes: 630, driver: 'Jordan Lee', run: 'Pickup run 204', status: 'Have ready by 10:30 AM', tone: 'ready', channel: 'Etsy' },
@@ -18,6 +26,22 @@ const freightCycles = {
   Month: { labels: ['Week 1', 'Week 2', 'Week 3', 'Week 4'], independent: [104, 128, 119, 146], fedex: [142, 131, 137, 126], total: 1033, independentTotal: 497, fedexTotal: 536 },
 }
 
+const SELLER_PICKUP_REQUESTS_KEY = 'hitch-seller-pickup-requests'
+
+function getSellerPickupRequests(platform) {
+  try {
+    const requests = JSON.parse(localStorage.getItem(SELLER_PICKUP_REQUESTS_KEY) || '{}')
+    return Array.isArray(requests[platform]) ? requests[platform] : []
+  } catch { return [] }
+}
+
+function saveSellerPickupRequest(platform, request) {
+  let requests = {}
+  try { requests = JSON.parse(localStorage.getItem(SELLER_PICKUP_REQUESTS_KEY) || '{}') } catch { /* Start a fresh demo request list if stored data is malformed. */ }
+  const platformRequests = Array.isArray(requests[platform]) ? requests[platform] : []
+  localStorage.setItem(SELLER_PICKUP_REQUESTS_KEY, JSON.stringify({ ...requests, [platform]: [...platformRequests, request] }))
+}
+
 function Brand() {
   return <a className="brand" href="/">hitch<span>.</span></a>
 }
@@ -25,7 +49,7 @@ function Brand() {
 function Landing() {
   return (
     <main className="landing">
-      <Brand />
+      <div className="landing-topbar"><Brand /><ThemeToggle /></div>
       <div className="landing-copy">
         <div className="eyebrow"><span className="eyebrow-dot" /> LOCAL DELIVERY, REIMAGINED</div>
         <h1>Good things<br />are <em>going places.</em></h1>
@@ -52,9 +76,12 @@ function Shipper() {
   const sellerPlatform = view === 'facebook' ? 'facebook' : 'etsy'
   const [activeFilter, setActiveFilter] = React.useState('All local orders')
   const [freightPeriod, setFreightPeriod] = React.useState('Week')
+  const [sellerRequests, setSellerRequests] = React.useState(() => getSellerPickupRequests(sellerPlatform))
+  const [showPickupForm, setShowPickupForm] = React.useState(false)
+  const [pickupRequestNotice, setPickupRequestNotice] = React.useState('')
   const localOrders = shipperOrders.filter(order => order.tone !== 'third-party')
   const remoteOrders = shipperOrders.filter(order => order.tone === 'third-party')
-  const sellerOrders = shipperOrders.filter(order => order.channel === (sellerPlatform === 'etsy' ? 'Etsy' : 'Facebook Marketplace'))
+  const sellerOrders = [...shipperOrders.filter(order => order.channel === (sellerPlatform === 'etsy' ? 'Etsy' : 'Facebook Marketplace')), ...sellerRequests]
   const sellerLocalOrders = sellerOrders.filter(order => order.tone !== 'third-party')
   const sellerDropoffs = sellerOrders.filter(order => order.tone === 'third-party')
   const firstSellerPickup = sellerLocalOrders.find(order => order.run)
@@ -64,11 +91,40 @@ function Shipper() {
   const cycleMax = Math.max(...cycle.labels.map((_, index) => cycle.independent[index] + cycle.fedex[index]))
   const independentShare = Math.round(cycle.independentTotal / cycle.total * 100)
   const fedexShare = 100 - independentShare
+  function submitPickupRequest(event) {
+    event.preventDefault()
+    const data = new FormData(event.currentTarget)
+    const product = String(data.get('product') || '').trim()
+    const pickupAddress = String(data.get('pickupAddress') || '').trim()
+    const destination = String(data.get('destination') || '').trim()
+    const dimensions = {
+      length: Number(data.get('length')), width: Number(data.get('width')), height: Number(data.get('height')),
+      unit: String(data.get('dimensionUnit') || 'in'),
+    }
+    const pickupStart = String(data.get('pickupStart') || '')
+    const pickupEnd = String(data.get('pickupEnd') || '')
+    if (new Date(pickupStart) <= new Date()) return setPickupRequestNotice('Choose a pickup window that starts in the future.')
+    if (new Date(pickupEnd) <= new Date(pickupStart)) return setPickupRequestNotice('The end of the pickup window must be after the start.')
+    const request = {
+      id: `PICKUP-${Date.now().toString().slice(-6)}`, customer: 'Your customer', item: product,
+      detail: `${data.get('quantity')} package${Number(data.get('quantity')) === 1 ? '' : 's'} · ${dimensions.length} × ${dimensions.width} × ${dimensions.height} ${dimensions.unit}${data.get('notes') ? ` · ${String(data.get('notes')).trim()}` : ''}`,
+      dimensions,
+      from: pickupAddress, to: destination,
+      pickup: `${formatDateTime(pickupStart)} – ${new Date(pickupEnd).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
+      pickupStart, pickupEnd, pickupMinutes: new Date(pickupStart).getTime(), driver: '', run: '',
+      status: 'Request sent · awaiting driver', tone: 'open', channel: sellerPlatform === 'etsy' ? 'Etsy' : 'Facebook Marketplace', userRequest: true,
+    }
+    saveSellerPickupRequest(sellerPlatform, request)
+    setSellerRequests(current => [...current, request])
+    setPickupRequestNotice(`${product} pickup request saved. Hitch will assign a local driver.`)
+    setShowPickupForm(false)
+    event.currentTarget.reset()
+  }
   return (
     <div className="shipper-app">
       <Sidebar />
       <main className="shipper-main">
-        <header className="dashboard-header"><div><div className="breadcrumb">SHIPPER WORKSPACE <span>/</span> {shipperMode === 'business' ? 'LOCAL FULFILLMENT' : 'SELLER PICKUPS'}</div><h1>{shipperMode === 'business' ? 'Good morning, Alex' : 'Your shop, on the move'} <span>✳</span></h1><p>{shipperMode === 'business' ? 'See what to have ready for each local pickup run.' : 'A simple view of local handoffs and orders going to a carrier.'}</p></div><a className="avatar" href="/">AT</a></header>
+        <header className="dashboard-header"><div><div className="breadcrumb">SHIPPER WORKSPACE <span>/</span> {shipperMode === 'business' ? 'LOCAL FULFILLMENT' : 'SELLER PICKUPS'}</div><h1>{shipperMode === 'business' ? 'Good morning, Alex' : 'Your shop, on the move'} <span>✳</span></h1><p>{shipperMode === 'business' ? 'See what to have ready for each local pickup run.' : 'A simple view of local handoffs and orders going to a carrier.'}</p></div><div className="dashboard-actions"><ThemeToggle /><a className="avatar" href="/">AT</a></div></header>
         {shipperMode === 'business' ? <>
         <section className="freight-dashboard"><div className="freight-head"><div><span className="board-kicker">FREIGHT PERFORMANCE · UTAH</span><h2>Local freight cycle</h2><p>Independent driver pickups compared with orders still on FedEx.</p></div><div className="period-switch" role="group" aria-label="Freight cycle period">{['Week', 'Month'].map(period => <button key={period} className={freightPeriod === period ? 'selected' : ''} onClick={() => setFreightPeriod(period)}>{period}</button>)}</div></div>
           <div className="freight-content"><div className="freight-chart"><div className="chart-legend"><span><i className="legend-independent" /> Independent carriers</span><span><i className="legend-fedex" /> FedEx truck</span><small>ORDERS / PERIOD</small></div><div className="chart-bars">{cycle.labels.map((label, index) => { const total = cycle.independent[index] + cycle.fedex[index]; return <div className="chart-column" key={label}><div className="bar-stack" title={`${cycle.independent[index]} independent, ${cycle.fedex[index]} FedEx`}><i className="bar-independent" style={{ height: `${cycle.independent[index] / cycleMax * 100}%` }} /><i className="bar-fedex" style={{ height: `${cycle.fedex[index] / cycleMax * 100}%` }} /></div><small>{label}</small><em>{total}</em></div> })}</div></div>
@@ -89,8 +145,19 @@ function Shipper() {
         </> : <section className="home-seller-view">
           <div className="seller-welcome"><div><span className="board-kicker">{sellerPlatform === 'etsy' ? 'ETSY SHOP · MIA CHEN' : 'FACEBOOK MARKETPLACE · MIA CHEN'}</span><h2>{sellerPlatform === 'etsy' ? 'Your Etsy orders' : 'Your Marketplace sales'}</h2><p>{sellerPlatform === 'etsy' ? 'Track local deliveries and parcels going to a shipping carrier.' : 'Keep local buyer pickups simple. We’ll tell you what to have ready.'}</p></div><span className={`seller-avatar ${sellerPlatform}`}>{sellerPlatform === 'etsy' ? 'E' : 'f'}</span></div>
           {firstSellerPickup && <div className="seller-next-pickup"><div className="seller-pickup-icon">↗</div><div className="seller-next-copy"><span>NEXT DRIVER PICKUP · TODAY</span><strong>{firstSellerPickup.pickup}</strong><small>{firstSellerPickup.driver} · independent local driver</small></div><b className="seller-ready-badge">{sellerLocalOrders.filter(order => order.run === firstSellerPickup.run).length} order{sellerLocalOrders.filter(order => order.run === firstSellerPickup.run).length === 1 ? '' : 's'} to have ready</b></div>}
-          <div className="seller-orders-heading"><div><span className="board-kicker">{sellerPlatform === 'etsy' ? 'ETSY FULFILLMENT' : 'MARKETPLACE FULFILLMENT'}</span><h2>Today’s handoffs</h2></div><span>{sellerLocalOrders.filter(order => order.run).length} local pickup{sellerLocalOrders.filter(order => order.run).length === 1 ? '' : 's'} · {sellerLocalOrders.filter(order => !order.run).length} waiting · {sellerDropoffs.length} carrier drop-off{sellerDropoffs.length === 1 ? '' : 's'}</span></div>
-          <div className="seller-order-list">{sellerLocalOrders.map(order => <article className="seller-order-card" key={order.id}><span className="seller-order-icon">{sellerPlatform === 'etsy' ? 'E' : 'f'}</span><div className="seller-order-copy"><strong>{order.item}</strong><small>{order.id} · Deliver to {order.to}</small></div><div className="seller-order-time"><strong>{order.pickup}</strong><small>{order.driver || 'Pickup time being arranged'}</small></div><span className={`order-status ${order.tone}`}>{order.run ? 'Have ready' : 'Waiting for pickup time'}</span></article>)}</div>
+          <div className="seller-orders-heading"><div><span className="board-kicker">{sellerPlatform === 'etsy' ? 'ETSY FULFILLMENT' : 'MARKETPLACE FULFILLMENT'}</span><h2>Today’s handoffs</h2></div><div className="seller-order-actions"><span>{sellerLocalOrders.filter(order => order.run).length} scheduled · {sellerLocalOrders.filter(order => !order.run).length} waiting · {sellerDropoffs.length} carrier drop-off{sellerDropoffs.length === 1 ? '' : 's'}</span><button type="button" className="seller-request-button" onClick={() => { setShowPickupForm(value => !value); setPickupRequestNotice('') }}>＋ Request a pickup</button></div></div>
+          {pickupRequestNotice && !showPickupForm && <div className="pickup-request-notice" role="status">{pickupRequestNotice}</div>}
+          {showPickupForm && <form className="seller-pickup-form" onSubmit={submitPickupRequest}><div className="seller-form-heading"><div><span className="board-kicker">NEW LOCAL PICKUP</span><h3>What do you need moved?</h3><p>Tell us what it is, where to collect it, where it needs to go, and when you’ll be ready.</p></div><button type="button" className="seller-form-close" onClick={() => setShowPickupForm(false)} aria-label="Close pickup request">×</button></div>
+            <div className="seller-form-grid"><div><label className="field-label" htmlFor="pickup-product">Product or item</label><input className="garage-input" id="pickup-product" name="product" placeholder="e.g. Vintage side table" required /></div><div><label className="field-label" htmlFor="pickup-quantity">Number of packages</label><select className="garage-input" id="pickup-quantity" name="quantity" defaultValue="1"><option value="1">1 package</option><option value="2">2 packages</option><option value="3">3 packages</option><option value="4">4 packages</option><option value="5">5+ packages</option></select></div>
+              <div><label className="field-label" htmlFor="pickup-address">Pickup location</label><input className="garage-input" id="pickup-address" name="pickupAddress" placeholder="Your address or meetup spot" required /></div><div><label className="field-label" htmlFor="pickup-destination">Deliver to</label><input className="garage-input" id="pickup-destination" name="destination" placeholder="Buyer address or carrier drop-off" required /></div>
+              <div className="seller-dimensions-field"><label className="field-label">Product dimensions <small>Measure the packed item</small></label><div className="seller-dimensions"><label><span>Length</span><input className="garage-input" name="length" type="number" min="0.1" step="0.1" placeholder="0" required /></label><label><span>Width</span><input className="garage-input" name="width" type="number" min="0.1" step="0.1" placeholder="0" required /></label><label><span>Height</span><input className="garage-input" name="height" type="number" min="0.1" step="0.1" placeholder="0" required /></label><label><span>Unit</span><select className="garage-input" name="dimensionUnit" defaultValue="in"><option value="in">in</option><option value="cm">cm</option></select></label></div></div>
+              <div><label className="field-label" htmlFor="pickup-window-start">Available for pickup from</label><input className="garage-input" id="pickup-window-start" name="pickupStart" type="datetime-local" defaultValue={localDateTime(1, 9)} required /></div><div><label className="field-label" htmlFor="pickup-window-end">Available for pickup until</label><input className="garage-input" id="pickup-window-end" name="pickupEnd" type="datetime-local" defaultValue={localDateTime(1, 12)} required /></div>
+              <div className="seller-form-notes"><label className="field-label" htmlFor="pickup-notes">Notes for the driver <small>Optional</small></label><input className="garage-input" id="pickup-notes" name="notes" placeholder="Size, fragile, meetup details…" /></div></div>
+            <div className="seller-pickup-explainer"><span>◷</span><p>This is when you can hand off the item. Hitch will find a driver and confirm the pickup as the route is planned.</p></div>
+            {pickupRequestNotice && <div className="form-error" role="alert">{pickupRequestNotice}</div>}
+            <button className="seller-submit-pickup" type="submit">Request this pickup <span>→</span></button>
+          </form>}
+          <div className="seller-order-list">{sellerLocalOrders.map(order => <article className="seller-order-card" key={order.id}><span className="seller-order-icon">{sellerPlatform === 'etsy' ? 'E' : 'f'}</span><div className="seller-order-copy"><strong>{order.item}</strong><small>{order.id} · Deliver to {order.to}</small>{order.detail && <small className="seller-item-detail">{order.detail}</small>}</div><div className="seller-order-time"><strong>{order.pickup}</strong><small>{order.driver || (order.userRequest ? 'Request sent · driver not assigned' : 'Pickup time being arranged')}</small></div><span className={`order-status ${order.tone}`}>{order.run ? 'Have ready' : order.userRequest ? 'Request sent' : 'Waiting for pickup time'}</span></article>)}</div>
           {sellerDropoffs.map(order => <div className="seller-dropoff" key={order.id}><span className="dropoff-icon">▣</span><div><span className="board-kicker">{sellerPlatform === 'etsy' ? 'PARCEL CARRIER DROP-OFF' : 'THIRD-PARTY DELIVERY'}</span><strong>{order.item}</strong><small>{order.id} · To {order.to} · {order.dropoffLocation} · driver {order.driver}</small></div><span className="order-status third-party">{order.pickup.replace('FedEx drop-off ', 'By ')}</span></div>)}
           <div className="seller-driver-note"><span>↗</span><p>{sellerPlatform === 'etsy' ? 'Etsy orders can go to nearby customers or to a post office or FedEx ship center. A driver can collect orders from multiple sellers on the same route.' : 'Marketplace drivers pick up from you and deliver directly to local buyers. Hitch can group multiple sellers and buyers into one route.'}</p></div>
           <div className="service-area"><span className="board-kicker">LOCAL DELIVERY AREAS</span><p>{localServiceAreas.map((area, index) => <React.Fragment key={area}><b>{area}</b>{index < localServiceAreas.length - 1 && <span> · </span>}</React.Fragment>)}</p><small>Long-distance orders go through a 3PL or parcel carrier.</small></div>
@@ -144,14 +211,30 @@ function localDateTime(daysAhead, hour) {
 function getAvailability() {
   try {
     const saved = JSON.parse(localStorage.getItem(AVAILABILITY_KEY))
-    if (Array.isArray(saved)) return saved
+    if (Array.isArray(saved)) {
+      const isOldSingleDemo = saved.length === 1 && saved[0]?.id === 'demo-block' && saved[0]?.sample
+      if (!isOldSingleDemo) return saved
+    }
   } catch { /* Start with the demo schedule if stored data is unavailable. */ }
-  const start = localDateTime(2, 9)
-  const end = localDateTime(2, 13)
-  const sample = [{
-    id: 'demo-block', startLocation: 'Sugar House, Salt Lake City', fuel: 75,
-    capacity: 8, vehicleLabel: 'Demo SUV · sample route', bookedCapacity: 2, bookedMinutes: 90, estimatedFill: 68, start, end, sample: true,
-  }]
+  function asLocalInput(value) {
+    return new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+  }
+  const lockedStart = new Date(Date.now() + 6 * 60 * 60_000)
+  lockedStart.setSeconds(0, 0)
+  const sample = [
+    { id: 'demo-block-1', start: asLocalInput(lockedStart), end: asLocalInput(new Date(lockedStart.getTime() + 4 * 60 * 60_000)), bookedCapacity: 5, bookedMinutes: 150, estimatedFill: 78, vehicleLabel: 'Demo SUV · sample route' },
+    ...[
+      { id: 'demo-block-2', days: 3, hour: 9, capacity: 4, vehicleLabel: 'Demo sedan' },
+      { id: 'demo-block-3', days: 8, hour: 10, capacity: 8, vehicleLabel: 'Demo SUV' },
+      { id: 'demo-block-4', days: 15, hour: 8, capacity: 10, vehicleLabel: 'Demo pickup truck' },
+      { id: 'demo-block-5', days: 23, hour: 9, capacity: 14, vehicleLabel: 'Demo cargo van' },
+    ].map(block => {
+      const start = new Date()
+      start.setDate(start.getDate() + block.days)
+      start.setHours(block.hour, 0, 0, 0)
+      return { ...block, start: asLocalInput(start), end: asLocalInput(new Date(start.getTime() + 4 * 60 * 60_000)), bookedCapacity: 0, bookedMinutes: 0, estimatedFill: 35 + block.days, sample: true, startLocation: 'Salt Lake City, Utah', fuel: 75 }
+    }),
+  ].map(block => ({ startLocation: 'Salt Lake City, Utah', fuel: 75, capacity: 8, bookedCapacity: 0, bookedMinutes: 0, estimatedFill: 42, ...block, sample: true }))
   localStorage.setItem(AVAILABILITY_KEY, JSON.stringify(sample))
   return sample
 }
@@ -174,7 +257,7 @@ function DriverNav({ active }) {
 }
 
 function DriverHeader({ title }) {
-  return <header className="carrier-header"><a className="back-to-views" href="/" aria-label="Choose a demo view">‹</a><Brand /><a className="carrier-profile" href="/carrier/garage" aria-label="Vehicle garage">JD</a></header>
+  return <header className="carrier-header"><a className="back-to-views" href="/" aria-label="Choose a demo view">‹</a><Brand /><ThemeToggle /><a className="carrier-profile" href="/carrier/garage" aria-label="Vehicle garage">JD</a></header>
 }
 
 function AvailabilityCard({ block, selected, onClick }) {
@@ -192,8 +275,14 @@ function AvailabilityCard({ block, selected, onClick }) {
     <div className="booking-progress capacity-progress"><div className="progress-label"><span>LIKELY ROUTE CAPACITY</span><strong>{block.estimatedFill ?? Math.max(38, capacityPercent)}%</strong></div><div className="progress-track"><i style={{ width: `${block.estimatedFill ?? Math.max(38, capacityPercent)}%` }} /></div><div className="progress-caption">Estimated route fill · {block.bookedCapacity} confirmed package spots so far</div></div>
     {block.sample && <div className="sample-note">Sample shipper bookings shown for demo</div>}
     {!locked && <div className="lock-note"><span>◷</span> Hitch is building your route · locks 12 hours before departure</div>}
-    <div className="route-card-hint">{selected ? 'Hide route details' : 'View route details'} <span>{selected ? '⌃' : '⌄'}</span></div>
+    <div className="route-card-hint">{locked ? 'Open locked route' : selected ? 'Hide route estimate' : 'View route estimate'} <span>{locked ? '→' : selected ? '⌃' : '⌄'}</span></div>
   </button>
+}
+
+function FormingRouteDetails({ block }) {
+  const fill = Math.max(0, Math.min(100, Number(block.estimatedFill ?? 42)))
+  const locksAt = new Date(new Date(block.start).getTime() - 12 * 60 * 60 * 1000)
+  return <section className="forming-route-details"><div><span className="card-date-label">HITCH IS BUILDING THIS ROUTE</span><strong>Estimated route fill · {fill}%</strong></div><div className="progress-track"><i style={{ width: `${fill}%` }} /></div><p>As orders are matched to this time block, the route estimate will update. The stop list and map preview appear when the route locks.</p><small>Route locks {formatDateTime(locksAt)}</small></section>
 }
 
 const demoStops = [
@@ -277,30 +366,49 @@ function RouteMap({ points, stops }) {
 
 function RouteDetails({ block, locked }) {
   const [routePoints, setRoutePoints] = React.useState(demoStops.map(({ lat, lon }) => ({ lat, lon })))
+  const [stops, setStops] = React.useState(block.routeStops || demoStops)
+  const [routeRecord, setRouteRecord] = React.useState(null)
   const [routeState, setRouteState] = React.useState('loading')
   const [progress, setProgress] = React.useState(() => readRouteProgress(block.id))
-  const stops = block.routeStops || demoStops
+  const routeId = block.routeId || block.route_id || block.id
   React.useEffect(() => {
     let cancelled = false
     setRouteState('loading')
-    fetch('/api/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locations: stops.map(({ lat, lon }) => ({ lat, lon })), costing: 'auto' }) })
+    fetch(`/api/driver/routes/${encodeURIComponent(routeId)}`)
       .then(response => { if (!response.ok) throw new Error('Route service unavailable'); return response.json() })
       .then(data => {
-        const legs = data.trip?.legs || []
-        const shapes = legs.map(leg => leg.shape).filter(Boolean)
-        if (!shapes.length) throw new Error('Route geometry is not available yet')
-        const geometry = shapes.flatMap((shape, index) => decodeRouteShape(shape).filter((_, pointIndex) => index === 0 || pointIndex > 0))
-        if (!cancelled) { setRoutePoints(geometry); setRouteState('ready') }
+        const route = data.route || data
+        const routeStops = Array.isArray(route.stops) && route.stops.length ? route.stops.map((stop, index) => {
+          const location = stop.location || stop
+          const type = stop.type === 'delivery' ? 'dropoff' : stop.type
+          return { ...stop, id: stop.id || `stop-${index + 1}`, type, label: stop.label || stop.address || stop.name || `Stop ${index + 1}`, lat: Number(location.lat), lon: Number(location.lon) }
+        }) : (block.routeStops || demoStops)
+        const geometryData = route.geometry || {}
+        let geometry = []
+        if (Array.isArray(geometryData.coordinates)) {
+          geometry = geometryData.coordinates.map(coordinate => Array.isArray(coordinate)
+            ? { lon: Number(coordinate[0]), lat: Number(coordinate[1]) }
+            : { lat: Number(coordinate.lat), lon: Number(coordinate.lon) })
+        } else {
+          const encoded = geometryData.encoded_polyline || geometryData.shape || route.encoded_polyline
+          if (encoded) geometry = decodeRouteShape(encoded, geometryData.precision ?? 6)
+        }
+        if (!cancelled) {
+          setRouteRecord(route)
+          setStops(routeStops)
+          if (geometry.length) { setRoutePoints(geometry); setRouteState('ready') }
+          else { setRoutePoints(routeStops); setRouteState('fallback') }
+        }
       })
       .catch(() => { if (!cancelled) setRouteState('fallback') })
     return () => { cancelled = true }
-  }, [block.id])
-  const receipts = block.receipts || [
+  }, [routeId, block.routeStops])
+  const receipts = routeRecord?.payouts?.map(payout => ({ shipper: payout.shipper_name || payout.shipper, item: payout.product_name || payout.item, amount: Number(payout.amount) })) || block.receipts || [
     { shipper: 'Acme Goods', item: 'Bakery order · ORD-2048', amount: 18.5 },
     { shipper: 'Mia Chen · Marketplace', item: 'Ceramic tableware · ORD-2049', amount: 12 },
     { shipper: 'Juniper Studio · Etsy', item: 'Gift parcel · ORD-2050', amount: 9.75 },
   ]
-  const total = receipts.reduce((sum, receipt) => sum + receipt.amount, 0)
+  const total = Number(routeRecord?.total_payout ?? receipts.reduce((sum, receipt) => sum + receipt.amount, 0))
   const nextStop = progress?.started && !progress?.complete ? stops[progress.currentStopIndex] : null
   function updateProgress(nextProgress) {
     setProgress(nextProgress)
@@ -317,9 +425,9 @@ function RouteDetails({ block, locked }) {
   return <section className="route-details" aria-label="Route details"><div className="route-details-heading"><div><span className="card-date-label">{locked ? 'LOCKED ROUTE PREVIEW' : 'ROUTE PREVIEW · STILL FORMING'}</span><h3>{block.startLocation} route</h3></div>{!locked && <span className="route-building-label"><i /> Route can still change</span>}</div>
     <div className="route-map-frame"><RouteMap points={routePoints} stops={stops} /></div>
     <div className="route-map-caption">{routeState === 'ready' ? 'Route line from Hitch routing · OpenStreetMap' : routeState === 'loading' ? 'Loading route geometry from Hitch…' : 'Routing preview unavailable · showing planned stop order'}</div>
-    <div className="route-stop-list">{stops.map((stop, index) => <div className={`route-stop-row ${stop.type}`} key={stop.id}><span>{stop.type === 'pickup' ? 'P' : stop.type === 'dropoff' ? 'D' : 'S'}</span><small>{String(index + 1).padStart(2, '0')}</small><strong>{stop.label}</strong></div>)}</div>
+    <div className="route-stop-list">{stops.map((stop, index) => <a className={`route-stop-row ${stop.type}`} key={stop.id} href={`https://www.google.com/maps/dir/?api=1&destination=${stop.lat}%2C${stop.lon}&travelmode=driving&dir_action=navigate`} aria-label={`Get Google Maps directions to ${stop.label}`}><span>{stop.type === 'pickup' ? 'P' : stop.type === 'dropoff' ? 'D' : 'S'}</span><small>{String(index + 1).padStart(2, '0')}</small><strong>{stop.label}</strong><b>Directions ↗</b></a>)}</div>
     <div className="navigation-panel">{!progress?.started ? <><div><span className="navigation-icon">➤</span><div><strong>{locked ? 'Ready to start?' : 'Route is still forming'}</strong><small>{locked ? 'Start when you are ready to head out.' : 'Navigation becomes available once Hitch locks your route.'}</small></div></div>{locked ? <button className="start-route-button" onClick={startRoute}>Start route <span>→</span></button> : <button className="start-route-button disabled" disabled>Start route <span>◷</span></button>}</> : progress.complete ? <div className="route-complete"><span>✓</span><div><strong>Route complete</strong><small>All stops have been marked complete.</small></div></div> : <><div className="next-stop-heading"><span className={`next-stop-marker ${nextStop.type}`}>{nextStop.type === 'pickup' ? 'P' : 'D'}</span><div><small>NEXT STOP · {nextStop.type.toUpperCase()}</small><strong>{nextStop.label.replace(/^(Pickup|Drop-off) · /, '')}</strong></div><b>{progress.currentStopIndex} of {stops.length - 1}</b></div><a className="navigate-button" href={mapsUrl}>Navigate to this stop in Google Maps <span>↗</span></a><button className="complete-stop-button" onClick={completeStop}>Mark stop complete <span>✓</span></button></>}</div>
-    <div className="fuel-stop-card"><span className="fuel-stop-icon">⛽</span><div><small>SUGGESTED FUEL STOP NEAR YOUR ROUTE</small><strong>Maverik · 1450 S 700 E, Salt Lake City</strong><span>Sample lowest price nearby · $3.19 / gal · approx. 4 min detour</span></div><b>↗</b></div>
+    <div className="fuel-stop-card"><span className="fuel-stop-icon">⛽</span><div><small>SUGGESTED FUEL STOP NEAR YOUR ROUTE</small><strong>{routeRecord?.fuel_suggestions?.[0]?.name || 'Maverik · 1450 S 700 E, Salt Lake City'}</strong><span>{routeRecord?.fuel_suggestions?.[0] ? `${routeRecord.fuel_suggestions[0].price_label} · ${routeRecord.fuel_suggestions[0].detour_label}` : 'Sample lowest price nearby · $3.19 / gal · approx. 4 min detour'}</span></div><b>↗</b></div>
     {locked && <div className="driver-receipt"><div className="receipt-heading"><div><span className="card-date-label">DRIVER PAYOUT RECEIPT</span><h3>What each shipper is paying</h3></div><span className="receipt-locked">✓ Locked</span></div>{receipts.map((receipt, index) => <div className="receipt-line" key={`${receipt.shipper}-${receipt.item}`}><span className="receipt-index">{String(index + 1).padStart(2, '0')}</span><div><strong>{receipt.shipper}</strong><small>{receipt.item}</small></div><b>${receipt.amount.toFixed(2)}</b></div>)}<div className="receipt-total"><span>Estimated route payout</span><strong>${total.toFixed(2)}</strong></div><small className="receipt-note">Demo payout amounts · final payment details will be confirmed by Hitch</small></div>}
   </section>
 }
@@ -336,10 +444,22 @@ function DriverDashboard() {
     <DriverHeader />
     <section className="carrier-welcome"><div className="carrier-kicker"><i /> CARRIER MODE · SALT LAKE CITY</div><h1>Hey, Jordan <span>✳</span></h1><p>Ready when you are. Set your hours and we’ll find deliveries along the way.</p></section>
     <section className="earnings-card"><div><span>YOUR EARNINGS TODAY</span><strong>$64.50</strong><small>3 deliveries completed</small></div><div className="earnings-spark">↗<span>+18%</span></div></section>
-    <section className="availability-section"><div className="availability-heading"><div><span>YOUR UPCOMING ROUTES</span><h2>Availability <b>{blocks.length}</b></h2></div><a href="/carrier/availability" className="add-availability">＋ <span>Schedule</span></a></div>
-      {blocks.length ? <div className="availability-list">{blocks.map(block => { const selected = selectedRoute === block.id; const locked = dispatchIsLocked(block); return <div className="route-entry" key={block.id}><AvailabilityCard block={block} selected={selected} onClick={() => setSelectedRoute(selected ? null : block.id)} />{selected && <RouteDetails block={block} locked={locked} />}</div> })}</div> : <div className="empty-availability"><span className="empty-icon">◷</span><strong>No availability scheduled</strong><p>Add a time block so shippers can plan around your route.</p><a href="/carrier/availability" className="empty-cta">Schedule availability <span>→</span></a></div>}
+    <section className="availability-section"><div className="availability-heading"><div><span>YOUR ROUTE SCHEDULE</span><h2>My availability <b>{blocks.length}</b></h2></div><a href="/carrier/availability" className="add-availability">＋ <span>Schedule</span></a></div>
+      {blocks.length > 0 && <div className="availability-list">{blocks.map(block => { const selected = selectedRoute === block.id; const locked = dispatchIsLocked(block); return <div className="route-entry" key={block.id}><AvailabilityCard block={block} selected={selected} onClick={() => { if (locked) window.location.href = `/carrier/route/${encodeURIComponent(block.id)}`; else setSelectedRoute(selected ? null : block.id) }} />{selected && !locked && <FormingRouteDetails block={block} />}</div> })}</div>}
+      {blocks.length === 0 && <div className="empty-availability"><span className="empty-icon">◷</span><strong>No availability scheduled</strong><p>Add time blocks for the days you plan to drive. Hitch will build routes as orders come in.</p><a href="/carrier/availability" className="empty-cta">Schedule availability <span>→</span></a></div>}
     </section>
     <a className="view-switch" href="/">Switch demo view</a>
+    <DriverNav active="home" />
+  </main>
+}
+
+function DriverRoutePage({ routeId }) {
+  const block = getAvailability().find(item => item.id === routeId)
+  const locked = block ? dispatchIsLocked(block) : false
+  return <main className="carrier-app driver-app driver-route-page">
+    <DriverHeader />
+    <section className="driver-route-page-heading"><a href="/carrier" className="mobile-back">← Back to my availability</a><div className="carrier-kicker"><i /> LOCKED-IN DRIVER ROUTE</div><h1>{block ? `${block.startLocation} route` : 'Route unavailable'}</h1><p>{block ? 'Your assigned stops, directions, and shipper payout details.' : 'This route is no longer in your availability list.'}</p></section>
+    {!block ? <div className="empty-availability"><span className="empty-icon">⌖</span><strong>We couldn’t find this route</strong><p>Return to your availability list to open one of your current routes.</p><a href="/carrier" className="empty-cta">Back to my routes <span>→</span></a></div> : !locked ? <div className="empty-availability"><span className="empty-icon">◷</span><strong>This route is still forming</strong><p>It will move into your locked routes when it reaches the 12-hour lock window.</p><a href="/carrier" className="empty-cta">Back to my availability <span>→</span></a></div> : <RouteDetails block={block} locked />}
     <DriverNav active="home" />
   </main>
 }
@@ -460,14 +580,25 @@ function Carrier({ path }) {
   if (path === '/carrier/availability') return <ScheduleAvailability />
   if (path === '/carrier/garage' || path === '/carrier/profile') return <VehicleGarage />
   if (path === '/carrier/activity') return <DriverPlaceholder type="activity" />
+  if (path.startsWith('/carrier/route/')) return <DriverRoutePage routeId={decodeURIComponent(path.slice('/carrier/route/'.length))} />
   return <DriverDashboard />
 }
 
-function App() {
+function AppContent() {
   const path = window.location.pathname.replace(/\/$/, '')
   if (path === '/shipper') return <Shipper />
   if (path === '/carrier' || path.startsWith('/carrier/')) return <Carrier path={path} />
   return <Landing />
+}
+
+function App() {
+  const [theme, setTheme] = React.useState(() => localStorage.getItem('hitch-theme') || 'light')
+  React.useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('hitch-theme', theme)
+  }, [theme])
+  const themeContext = { theme, toggleTheme: () => setTheme(current => current === 'dark' ? 'light' : 'dark') }
+  return <ThemeContext.Provider value={themeContext}><AppContent /></ThemeContext.Provider>
 }
 
 createRoot(document.getElementById('root')).render(<App />)
