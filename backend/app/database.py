@@ -160,6 +160,32 @@ _SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS travel_times (
+        a_lat DOUBLE PRECISION NOT NULL,
+        a_lon DOUBLE PRECISION NOT NULL,
+        b_lat DOUBLE PRECISION NOT NULL,
+        b_lon DOUBLE PRECISION NOT NULL,
+        seconds DOUBLE PRECISION NOT NULL,
+        estimated BOOLEAN NOT NULL DEFAULT FALSE,
+        PRIMARY KEY (a_lat, a_lon, b_lat, b_lon)
+    )
+    """,
+    "ALTER TABLE travel_times ADD COLUMN IF NOT EXISTS estimated BOOLEAN NOT NULL DEFAULT FALSE",
+    """
+    CREATE TABLE IF NOT EXISTS demo_state (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS last_minute_requests (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        data JSONB NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS driver_routes (
         id TEXT PRIMARY KEY,
         availability_id TEXT NOT NULL,

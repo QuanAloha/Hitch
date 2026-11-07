@@ -21,7 +21,9 @@ from fastapi import APIRouter, HTTPException, Query
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app import demo_clock, dispatch_engine
 from app.database import get_db_connection, initialize_database
+from app.route_geometry import ValhallaUnavailable, fetch_route_geometry, stops_to_locations
 
 router = APIRouter(prefix="/api")
 
@@ -48,7 +50,8 @@ DEFAULT_CAPACITY = 4
 # ==========================================
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    """Demo time: real time plus the offset moved by `python -m app.demo advance`."""
+    return demo_clock.now()
 
 
 def _new_id(prefix: str) -> str:
@@ -241,10 +244,9 @@ class PickupRequestCreate(BaseModel):
     available_window: TimeWindow
 
 
-@router.post("/seller/pickup-requests", status_code=201)
-def create_pickup_request(body: PickupRequestCreate):
-    request_id = _new_id("pickup-request")
-    created_at = _now()
+def store_pickup_request(body: PickupRequestCreate, created_at: datetime, request_id: Optional[str] = None) -> dict:
+    """Insert a seller pickup request into the queue (shared by the API and demo scripts)."""
+    request_id = request_id or _new_id("pickup-request")
     document = {
         "id": request_id,
         **body.model_dump(mode="json", exclude={"available_window"}),
@@ -264,6 +266,21 @@ def create_pickup_request(body: PickupRequestCreate):
             (request_id, body.source, created_at, Jsonb(document)),
         )
     )
+    return document
+
+
+@router.post("/seller/pickup-requests", status_code=201)
+def create_pickup_request(body: PickupRequestCreate):
+    created_at = _now()
+    document = store_pickup_request(body, created_at)
+    # Join the queue now: shows where it will land (provisional) or opens a last-minute request.
+    try:
+        dispatch_engine.on_new_booking(created_at)
+        document = _db_call(
+            lambda c: c.execute("SELECT data FROM seller_pickup_requests WHERE id = %s", (document["id"],)).fetchone()[0]
+        )
+    except Exception:  # booking must never fail because planning did
+        pass
     return document
 
 
@@ -346,7 +363,9 @@ def _public_vehicle(document: dict[str, Any]) -> dict[str, Any]:
 def list_vehicles():
     rows = _db_call(
         lambda c: c.execute(
-            "SELECT data FROM driver_vehicles ORDER BY created_at"
+            "SELECT data FROM driver_vehicles "
+            "WHERE COALESCE(data->>'driver_id', %s) = %s ORDER BY created_at",
+            (dispatch_engine.DEFAULT_DRIVER_ID, dispatch_engine.DEFAULT_DRIVER_ID),
         ).fetchall()
     )
     return {"vehicles": [_public_vehicle(row[0]) for row in rows]}
@@ -473,7 +492,7 @@ def list_availability(
     to: Optional[datetime] = None,
 ):
     """Every availability block the driver posted, forming or locked."""
-    clauses, params = [], []
+    clauses, params = ["COALESCE(data->>'driver_id', %s) = %s"], [dispatch_engine.DEFAULT_DRIVER_ID] * 2
     if from_:
         clauses.append("end_at > %s")
         params.append(from_)
@@ -507,8 +526,9 @@ def create_availability(body: AvailabilityCreate):
         vehicle = row[0]
 
         overlap = connection.execute(
-            "SELECT 1 FROM driver_availability WHERE start_at < %s AND end_at > %s",
-            (body.window.end, body.window.start),
+            "SELECT 1 FROM driver_availability WHERE start_at < %s AND end_at > %s "
+            "AND COALESCE(data->>'driver_id', %s) = %s",
+            (body.window.end, body.window.start, dispatch_engine.DEFAULT_DRIVER_ID, dispatch_engine.DEFAULT_DRIVER_ID),
         ).fetchone()
         if overlap:
             raise HTTPException(
@@ -611,10 +631,42 @@ def _fuel_stops(route_doc: dict) -> list[dict]:
     return result
 
 
+def _ensure_valhalla_geometry(route_doc: dict) -> None:
+    """Give the route a road-following line from Valhalla, cached on the route.
+
+    If Valhalla is unreachable the stored geometry (possibly none) is left as is,
+    and the frontend falls back to a stop-to-stop preview.
+    """
+    if (route_doc.get("geometry") or {}).get("source") == "valhalla":
+        return
+    locations = stops_to_locations(route_doc.get("stops", []))
+    if not locations:
+        return
+    try:
+        route_doc["geometry"] = fetch_route_geometry(locations)["geometry"]
+    except ValhallaUnavailable:
+        return
+    _db_call(lambda c: _save_route_doc(c, route_doc))
+
+
 @router.get("/driver/routes/{route_id}")
 def get_driver_route(route_id: str):
     route_doc, availability = _db_call(lambda c: _get_route_doc(c, route_id))
+    _ensure_valhalla_geometry(route_doc)
     return _route_response(route_doc, availability)
+
+
+class RoutePreviewRequest(BaseModel):
+    locations: list[Place] = Field(min_length=2, max_length=25)
+
+
+@router.post("/driver/route-preview")
+def preview_route(body: RoutePreviewRequest):
+    """Road geometry for a set of candidate stops (nothing is stored)."""
+    try:
+        return fetch_route_geometry([p.model_dump() for p in body.locations])
+    except ValhallaUnavailable as exc:
+        raise HTTPException(status_code=503, detail="Routing service unavailable") from exc
 
 
 @router.get("/driver/routes/{route_id}/fuel-stops")
@@ -682,3 +734,72 @@ def complete_stop(route_id: str, stop_id: str):
         }
 
     return _db_call(run)
+
+
+# ==========================================
+# 6. LAST-MINUTE REQUESTS + DEMO CLOCK
+# ==========================================
+
+def _preview_stops(request_doc: dict, blk) -> list[dict]:
+    """Start point, then the stops this request would add, in route order."""
+    new_ids = set(request_doc["package_ids"])
+    stops = [{"id": "start", "type": "start", "label": "Start · your route", "lat": blk.start[0], "lon": blk.start[1]}] if blk else []
+    if blk:
+        for index, stop in enumerate(blk.seq):
+            if stop.pkg.id in new_ids:
+                place = stop.pkg.pick_info if stop.kind == "pickup" else stop.pkg.drop_info
+                stops.append({
+                    "id": f"{stop.kind}-{index}", "type": "pickup" if stop.kind == "pickup" else "dropoff",
+                    "label": f"{'Pickup' if stop.kind == 'pickup' else 'Drop-off'} · {place.get('label') or place.get('address')}",
+                    "lat": stop.pt[0], "lon": stop.pt[1],
+                })
+    return stops
+
+
+@router.get("/driver/last-minute-requests")
+def list_last_minute_requests():
+    """Open requests nobody could cover on time, with the best fit on this driver's routes."""
+    now = _now()
+
+    def run(connection):
+        rows = connection.execute(
+            "SELECT data FROM last_minute_requests WHERE status = 'open' ORDER BY created_at"
+        ).fetchall()
+        results = []
+        for (doc,) in rows:
+            if datetime.fromisoformat(doc["pickup_window"]["end"]) <= now:
+                continue
+            fits = dispatch_engine.find_fits(connection, doc, now)
+            fit = None
+            blk = None
+            if fits:
+                rec, extra, blk, _ = fits[0]
+                fit = {
+                    "availability_id": rec.id, "route_id": rec.route_id,
+                    "extra_drive_minutes": round(extra / 60), "route_state": "locked" if rec.route_id else "forming",
+                }
+            results.append({**doc, "fit": fit, "preview_stops": _preview_stops(doc, blk)})
+        return results
+
+    return {"requests": _db_call(run)}
+
+
+class LastMinuteAccept(BaseModel):
+    availability_id: Optional[str] = None
+
+
+@router.post("/driver/last-minute-requests/{request_id}/accept")
+def accept_last_minute_request(request_id: str, body: LastMinuteAccept = LastMinuteAccept()):
+    try:
+        return dispatch_engine.accept_last_minute(request_id, body.availability_id, _now())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/demo/clock")
+def get_demo_clock():
+    """Demo time, so the browser can run on the same clock as the dispatcher."""
+    current = _now()
+    return {"now": current.isoformat(), "offset_seconds": demo_clock.offset_seconds()}
