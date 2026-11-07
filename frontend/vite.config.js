@@ -5,6 +5,14 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: '0.0.0.0',
-    proxy: { '/api': 'http://backend:8000', '/health': 'http://backend:8000' },
+    proxy: {
+      '/api': 'http://backend:8000',
+      '/health': 'http://backend:8000',
+      '/geocoding': {
+        target: 'http://nominatim:8080',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/geocoding/, '/search'),
+      },
+    },
   },
 })

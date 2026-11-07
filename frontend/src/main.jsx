@@ -3,6 +3,23 @@ import { createRoot } from 'react-dom/client'
 import './style.css'
 
 const ThemeContext = React.createContext(null)
+const DEMO_TIME_OFFSET_KEY = 'hitch-demo-time-offset-days'
+
+function demoNow() {
+  const days = Number(localStorage.getItem(DEMO_TIME_OFFSET_KEY) || 0)
+  return new Date(Date.now() + days * 24 * 60 * 60_000)
+}
+
+function advanceDemoDay() {
+  const days = Number(localStorage.getItem(DEMO_TIME_OFFSET_KEY) || 0)
+  localStorage.setItem(DEMO_TIME_OFFSET_KEY, String(days + 1))
+  window.location.reload()
+}
+
+function resetDemoClock() {
+  localStorage.removeItem(DEMO_TIME_OFFSET_KEY)
+  window.location.reload()
+}
 
 function ThemeToggle() {
   const { theme, toggleTheme } = React.useContext(ThemeContext)
@@ -27,6 +44,52 @@ const freightCycles = {
 }
 
 const SELLER_PICKUP_REQUESTS_KEY = 'hitch-seller-pickup-requests'
+const NOMINATIM_MIN_INTERVAL_MS = 1100
+let nominatimRequestQueue = Promise.resolve()
+let lastNominatimRequestAt = 0
+
+function searchNominatim(query) {
+  const request = nominatimRequestQueue.then(async () => {
+    const waitMs = Math.max(0, NOMINATIM_MIN_INTERVAL_MS - (Date.now() - lastNominatimRequestAt))
+    if (waitMs) await new Promise(resolve => window.setTimeout(resolve, waitMs))
+    lastNominatimRequestAt = Date.now()
+    const params = new URLSearchParams({ q: query, format: 'jsonv2', addressdetails: '1', limit: '5', countrycodes: 'us' })
+    const response = await fetch(`/geocoding?${params.toString()}`, { headers: { 'Accept-Language': navigator.language || 'en' } })
+    if (!response.ok) throw new Error('Local address search is unavailable')
+    return response.json()
+  })
+  nominatimRequestQueue = request.catch(() => {})
+  return request
+}
+
+function GeocodedAddressField({ name, label, placeholder, required = true }) {
+  const [query, setQuery] = React.useState('')
+  const [results, setResults] = React.useState([])
+  const [selected, setSelected] = React.useState(null)
+  const [status, setStatus] = React.useState('')
+  const [searching, setSearching] = React.useState(false)
+  async function findAddress() {
+    if (query.trim().length < 4) { setStatus('Enter a fuller address to search.'); return }
+    setSearching(true)
+    setStatus('Searching the local OpenStreetMap index…')
+    setResults([])
+    try {
+      const matches = await searchNominatim(query.trim())
+      setResults(matches)
+      setStatus(matches.length ? 'Choose the matching address.' : 'No matches found. Check the address and try again.')
+    } catch {
+      setStatus('Address search is unavailable. Check that the local Nominatim service has finished starting.')
+    } finally { setSearching(false) }
+  }
+  function chooseAddress(result) {
+    const coordinates = { lat: Number(result.lat), lon: Number(result.lon), label: result.display_name }
+    setSelected(coordinates)
+    setQuery(result.display_name)
+    setResults([])
+    setStatus('Address matched · coordinates ready for routing.')
+  }
+  return <div className="geocoded-address-field"><label className="field-label" htmlFor={`${name}-address`}>{label}</label><div className="geocode-input-row"><input className="garage-input" id={`${name}-address`} name={name} value={query} onChange={event => { setQuery(event.target.value); setSelected(null); setStatus(''); setResults([]) }} placeholder={placeholder} required={required} /><button type="button" onClick={findAddress} disabled={searching || !query.trim()}>{searching ? 'Searching…' : selected ? 'Find again' : 'Find address'}</button></div><input type="hidden" name={`${name}Lat`} value={selected?.lat ?? ''} /><input type="hidden" name={`${name}Lon`} value={selected?.lon ?? ''} />{status && <small className={`geocode-status ${selected ? 'geocode-success' : ''}`} aria-live="polite">{status}</small>}{results.length > 0 && <div className="geocode-results" role="listbox" aria-label={`${label} matches`}>{results.map(result => <button type="button" role="option" key={`${result.osm_type}-${result.osm_id}`} onClick={() => chooseAddress(result)}><strong>{result.name || result.display_name.split(',')[0]}</strong><small>{result.display_name}</small></button>)}</div>}<small className="geocode-credit">Search powered by local Nominatim · © OpenStreetMap contributors</small></div>
+}
 
 function getSellerPickupRequests(platform) {
   try {
@@ -70,13 +133,15 @@ function EtsyCarrierBatchForm({ onSubmit, onCancel }) {
     }
     const pickupStart = String(data.get('pickupStart'))
     const pickupEnd = String(data.get('pickupEnd'))
+    if (data.get('pickupAddressLat') === '' || data.get('pickupAddressLon') === '' || data.get('dropoffLocationLat') === '' || data.get('dropoffLocationLon') === '') { setError('Search for and select both the pickup address and carrier drop-off location.'); return }
     if (String(data.get('carrier')) === 'Other carrier' && !String(data.get('carrierOther') || '').trim()) { setError('Enter the name of your carrier.'); return }
-    if (new Date(pickupStart) <= new Date()) { setError('Choose a pickup window that starts in the future.'); return }
+    if (new Date(pickupStart) <= demoNow()) { setError('Choose a pickup window that starts in the future.'); return }
     if (new Date(pickupEnd) <= new Date(pickupStart)) { setError('The pickup window must end after it starts.'); return }
     onSubmit({
       id: `BATCH-${Date.now().toString().slice(-6)}`, name: String(data.get('batchName')).trim(),
       carrier: String(data.get('carrier')) === 'Other carrier' ? String(data.get('carrierOther')).trim() : String(data.get('carrier')), dropoffLocation: String(data.get('dropoffLocation')).trim(),
-      pickupAddress: String(data.get('pickupAddress')).trim(), pickupStart, pickupEnd, items,
+      dropoffCoordinates: { lat: Number(data.get('dropoffLocationLat')), lon: Number(data.get('dropoffLocationLon')) },
+      pickupAddress: String(data.get('pickupAddress')).trim(), pickupCoordinates: { lat: Number(data.get('pickupAddressLat')), lon: Number(data.get('pickupAddressLon')) }, pickupStart, pickupEnd, items,
       pickupWindow: `${formatDateTime(pickupStart)} – ${new Date(pickupEnd).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
       status: 'Batch ready · awaiting driver', createdAt: new Date().toISOString(),
     })
@@ -84,7 +149,7 @@ function EtsyCarrierBatchForm({ onSubmit, onCancel }) {
   return <form className="etsy-batch-form" onSubmit={submit}>
     <div className="seller-form-heading"><div><span className="board-kicker">ETSY PARCEL SHIPPING</span><h3>Prepare a carrier batch</h3><p>Group the parcels you want one driver to take to the same carrier drop-off.</p></div><button type="button" className="seller-form-close" onClick={onCancel} aria-label="Close batch form">×</button></div>
     <div className="seller-form-grid"><div><label className="field-label" htmlFor="etsy-batch-name">Batch name</label><input className="garage-input" id="etsy-batch-name" name="batchName" placeholder="e.g. Friday Etsy orders" required /></div><div><label className="field-label" htmlFor="etsy-carrier">Carrier</label><select className="garage-input" id="etsy-carrier" name="carrier" defaultValue="USPS"><option>USPS</option><option>FedEx</option><option>UPS</option><option>Other carrier</option></select><small className="etsy-form-hint">For another carrier, enter its name here.</small><input className="garage-input" name="carrierOther" placeholder="Optional carrier name" /></div>
-      <div><label className="field-label" htmlFor="etsy-pickup-address">Pickup from</label><input className="garage-input" id="etsy-pickup-address" name="pickupAddress" placeholder="Your home studio or pickup address" required /></div><div><label className="field-label" htmlFor="etsy-dropoff-location">Carrier drop-off location</label><input className="garage-input" id="etsy-dropoff-location" name="dropoffLocation" placeholder="Post office or ship center address" required /></div>
+      <GeocodedAddressField name="pickupAddress" label="Pickup from" placeholder="Your home studio or pickup address" /><GeocodedAddressField name="dropoffLocation" label="Carrier drop-off location" placeholder="Post office or ship center address" />
       <div><label className="field-label" htmlFor="etsy-pickup-start">Ready for pickup from</label><input className="garage-input" id="etsy-pickup-start" name="pickupStart" type="datetime-local" defaultValue={localDateTime(1, 9)} required /></div><div><label className="field-label" htmlFor="etsy-pickup-end">Ready until</label><input className="garage-input" id="etsy-pickup-end" name="pickupEnd" type="datetime-local" defaultValue={localDateTime(1, 12)} required /></div></div>
     <div className="etsy-package-heading"><div><strong>Parcels in this batch</strong><small>Enter packed dimensions so the driver can check vehicle fit.</small></div><label className="etsy-unit-select"><span>Units</span><select name="dimensionUnit" defaultValue="in"><option value="in">inches</option><option value="cm">cm</option></select></label></div>
     <div className="etsy-package-list" id="etsy-batch-dimensions">{packages.map((item, index) => <div className="etsy-package-row" key={item.id}><span className="etsy-package-number">{String(index + 1).padStart(2, '0')}</span><label className="etsy-package-name"><span>Product</span><input className="garage-input" value={item.name} onChange={event => updatePackage(item.id, 'name', event.target.value)} placeholder="Handmade item" /></label><label><span>L</span><input className="garage-input" type="number" min="0.1" step="0.1" value={item.length} onChange={event => updatePackage(item.id, 'length', event.target.value)} placeholder="0" /></label><label><span>W</span><input className="garage-input" type="number" min="0.1" step="0.1" value={item.width} onChange={event => updatePackage(item.id, 'width', event.target.value)} placeholder="0" /></label><label><span>H</span><input className="garage-input" type="number" min="0.1" step="0.1" value={item.height} onChange={event => updatePackage(item.id, 'height', event.target.value)} placeholder="0" /></label>{packages.length > 1 && <button type="button" className="remove-batch-package" aria-label={`Remove package ${index + 1}`} onClick={() => setPackages(current => current.filter(entry => entry.id !== item.id))}>×</button>}</div>)}</div>
@@ -158,13 +223,16 @@ function Shipper() {
     }
     const pickupStart = String(data.get('pickupStart') || '')
     const pickupEnd = String(data.get('pickupEnd') || '')
-    if (new Date(pickupStart) <= new Date()) return setPickupRequestNotice('Choose a pickup window that starts in the future.')
+    if (data.get('pickupAddressLat') === '' || data.get('pickupAddressLon') === '' || data.get('destinationLat') === '' || data.get('destinationLon') === '') return setPickupRequestNotice('Search for and select both the pickup and delivery addresses.')
+    if (new Date(pickupStart) <= demoNow()) return setPickupRequestNotice('Choose a pickup window that starts in the future.')
     if (new Date(pickupEnd) <= new Date(pickupStart)) return setPickupRequestNotice('The end of the pickup window must be after the start.')
     const request = {
       id: `PICKUP-${Date.now().toString().slice(-6)}`, customer: 'Your customer', item: product,
       detail: `${data.get('quantity')} package${Number(data.get('quantity')) === 1 ? '' : 's'} · ${dimensions.length} × ${dimensions.width} × ${dimensions.height} ${dimensions.unit}${data.get('notes') ? ` · ${String(data.get('notes')).trim()}` : ''}`,
       dimensions,
       from: pickupAddress, to: destination,
+      pickupCoordinates: { lat: Number(data.get('pickupAddressLat')), lon: Number(data.get('pickupAddressLon')) },
+      destinationCoordinates: { lat: Number(data.get('destinationLat')), lon: Number(data.get('destinationLon')) },
       pickup: `${formatDateTime(pickupStart)} – ${new Date(pickupEnd).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`,
       pickupStart, pickupEnd, pickupMinutes: new Date(pickupStart).getTime(), driver: '', run: '',
       status: 'Request sent · awaiting driver', tone: 'open', channel: sellerPlatform === 'etsy' ? 'Etsy' : 'Facebook Marketplace', userRequest: true,
@@ -213,7 +281,7 @@ function Shipper() {
           {sellerPlatform === 'etsy' && showBatchForm && <EtsyCarrierBatchForm onSubmit={submitEtsyBatch} onCancel={() => setShowBatchForm(false)} />}
           {showPickupForm && <form className="seller-pickup-form" onSubmit={submitPickupRequest}><div className="seller-form-heading"><div><span className="board-kicker">NEW LOCAL PICKUP</span><h3>What do you need moved?</h3><p>Tell us what it is, where to collect it, where it needs to go, and when you’ll be ready.</p></div><button type="button" className="seller-form-close" onClick={() => setShowPickupForm(false)} aria-label="Close pickup request">×</button></div>
             <div className="seller-form-grid"><div><label className="field-label" htmlFor="pickup-product">Product or item</label><input className="garage-input" id="pickup-product" name="product" placeholder="e.g. Vintage side table" required /></div><div><label className="field-label" htmlFor="pickup-quantity">Number of packages</label><select className="garage-input" id="pickup-quantity" name="quantity" defaultValue="1"><option value="1">1 package</option><option value="2">2 packages</option><option value="3">3 packages</option><option value="4">4 packages</option><option value="5">5+ packages</option></select></div>
-              <div><label className="field-label" htmlFor="pickup-address">Pickup location</label><input className="garage-input" id="pickup-address" name="pickupAddress" placeholder="Your address or meetup spot" required /></div><div><label className="field-label" htmlFor="pickup-destination">Deliver to</label><input className="garage-input" id="pickup-destination" name="destination" placeholder="Buyer address or carrier drop-off" required /></div>
+              <GeocodedAddressField name="pickupAddress" label="Pickup location" placeholder="Your address or meetup spot" /><GeocodedAddressField name="destination" label="Deliver to" placeholder="Buyer address or carrier drop-off" />
               <div className="seller-dimensions-field"><label className="field-label">Product dimensions <small>Measure the packed item</small></label><div className="seller-dimensions"><label><span>Length</span><input className="garage-input" name="length" type="number" min="0.1" step="0.1" placeholder="0" required /></label><label><span>Width</span><input className="garage-input" name="width" type="number" min="0.1" step="0.1" placeholder="0" required /></label><label><span>Height</span><input className="garage-input" name="height" type="number" min="0.1" step="0.1" placeholder="0" required /></label><label><span>Unit</span><select className="garage-input" name="dimensionUnit" defaultValue="in"><option value="in">in</option><option value="cm">cm</option></select></label></div></div>
               <div><label className="field-label" htmlFor="pickup-window-start">Available for pickup from</label><input className="garage-input" id="pickup-window-start" name="pickupStart" type="datetime-local" defaultValue={localDateTime(1, 9)} required /></div><div><label className="field-label" htmlFor="pickup-window-end">Available for pickup until</label><input className="garage-input" id="pickup-window-end" name="pickupEnd" type="datetime-local" defaultValue={localDateTime(1, 12)} required /></div>
               <div className="seller-form-notes"><label className="field-label" htmlFor="pickup-notes">Notes for the driver <small>Optional</small></label><input className="garage-input" id="pickup-notes" name="notes" placeholder="Size, fragile, meetup details…" /></div></div>
@@ -265,7 +333,7 @@ function vehicleDisplayName(vehicle) {
 }
 
 function localDateTime(daysAhead, hour) {
-  const date = new Date()
+  const date = demoNow()
   date.setDate(date.getDate() + daysAhead)
   date.setHours(hour, 0, 0, 0)
   const offset = date.getTimezoneOffset()
@@ -283,7 +351,7 @@ function getAvailability() {
   function asLocalInput(value) {
     return new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
   }
-  const lockedStart = new Date(Date.now() + 6 * 60 * 60_000)
+  const lockedStart = new Date(demoNow().getTime() + 6 * 60 * 60_000)
   lockedStart.setSeconds(0, 0)
   const sample = [
     { id: 'demo-block-1', start: asLocalInput(lockedStart), end: asLocalInput(new Date(lockedStart.getTime() + 4 * 60 * 60_000)), bookedCapacity: 5, bookedMinutes: 150, estimatedFill: 78, vehicleLabel: 'Demo SUV · sample route' },
@@ -293,7 +361,7 @@ function getAvailability() {
       { id: 'demo-block-4', days: 15, hour: 8, capacity: 10, vehicleLabel: 'Demo pickup truck' },
       { id: 'demo-block-5', days: 23, hour: 9, capacity: 14, vehicleLabel: 'Demo cargo van' },
     ].map(block => {
-      const start = new Date()
+      const start = demoNow()
       start.setDate(start.getDate() + block.days)
       start.setHours(block.hour, 0, 0, 0)
       return { ...block, start: asLocalInput(start), end: asLocalInput(new Date(start.getTime() + 4 * 60 * 60_000)), bookedCapacity: 0, bookedMinutes: 0, estimatedFill: 35 + block.days, sample: true, startLocation: 'Salt Lake City, Utah', fuel: 75 }
@@ -308,7 +376,7 @@ function formatDateTime(value) {
 }
 
 function dispatchIsLocked(block) {
-  return new Date(block.start).getTime() - Date.now() <= 12 * 60 * 60 * 1000
+  return new Date(block.start).getTime() - demoNow().getTime() <= 12 * 60 * 60 * 1000
 }
 
 function DriverNav({ active }) {
@@ -399,6 +467,30 @@ function decodeRouteShape(encoded, precision = 6) {
   return coordinates
 }
 
+function extractRouteGeometry(route) {
+  const geometry = route.geometry || route.trip?.geometry || {}
+  const coordinates = Array.isArray(geometry) ? geometry : geometry.coordinates
+  if (Array.isArray(coordinates)) {
+    return coordinates.map(coordinate => Array.isArray(coordinate)
+      ? { lon: Number(coordinate[0]), lat: Number(coordinate[1]) }
+      : { lat: Number(coordinate.lat), lon: Number(coordinate.lon) })
+      .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon))
+  }
+  const legs = route.trip?.legs || route.legs || []
+  if (legs.length) {
+    return legs.flatMap(leg => {
+      const shape = leg.shape || leg.geometry?.shape || leg.geometry?.encoded_polyline
+      if (!shape) return []
+      try { return decodeRouteShape(shape, leg.shape_precision ?? route.trip?.shape_precision ?? 6) } catch { return [] }
+    })
+  }
+  const encoded = geometry.encoded_polyline || geometry.shape || route.encoded_polyline || route.shape
+  if (encoded) {
+    try { return decodeRouteShape(encoded, geometry.precision ?? geometry.shape_precision ?? 6) } catch { return [] }
+  }
+  return []
+}
+
 function tilePoint({ lat, lon }, zoom) {
   const scale = 256 * 2 ** zoom
   const safeLat = Math.max(-85.0511, Math.min(85.0511, lat)) * Math.PI / 180
@@ -438,7 +530,7 @@ function RouteMap({ points, stops }) {
 }
 
 function RouteDetails({ block, locked }) {
-  const [routePoints, setRoutePoints] = React.useState(demoStops.map(({ lat, lon }) => ({ lat, lon })))
+  const [routePoints, setRoutePoints] = React.useState([])
   const [stops, setStops] = React.useState(block.routeStops || demoStops)
   const [routeRecord, setRouteRecord] = React.useState(null)
   const [routeState, setRouteState] = React.useState('loading')
@@ -456,24 +548,15 @@ function RouteDetails({ block, locked }) {
           const type = stop.type === 'delivery' ? 'dropoff' : stop.type
           return { ...stop, id: stop.id || `stop-${index + 1}`, type, label: stop.label || stop.address || stop.name || `Stop ${index + 1}`, lat: Number(location.lat), lon: Number(location.lon) }
         }) : (block.routeStops || demoStops)
-        const geometryData = route.geometry || {}
-        let geometry = []
-        if (Array.isArray(geometryData.coordinates)) {
-          geometry = geometryData.coordinates.map(coordinate => Array.isArray(coordinate)
-            ? { lon: Number(coordinate[0]), lat: Number(coordinate[1]) }
-            : { lat: Number(coordinate.lat), lon: Number(coordinate.lon) })
-        } else {
-          const encoded = geometryData.encoded_polyline || geometryData.shape || route.encoded_polyline
-          if (encoded) geometry = decodeRouteShape(encoded, geometryData.precision ?? 6)
-        }
+        const geometry = extractRouteGeometry(route)
         if (!cancelled) {
           setRouteRecord(route)
           setStops(routeStops)
           if (geometry.length) { setRoutePoints(geometry); setRouteState('ready') }
-          else { setRoutePoints(routeStops); setRouteState('fallback') }
+          else { setRoutePoints([]); setRouteState('fallback') }
         }
       })
-      .catch(() => { if (!cancelled) setRouteState('fallback') })
+      .catch(() => { if (!cancelled) { setRoutePoints([]); setRouteState('fallback') } })
     return () => { cancelled = true }
   }, [routeId, block.routeStops])
   const receipts = routeRecord?.payouts?.map(payout => ({ shipper: payout.shipper_name || payout.shipper, item: payout.product_name || payout.item, amount: Number(payout.amount) })) || block.receipts || [
@@ -497,7 +580,7 @@ function RouteDetails({ block, locked }) {
   const mapsUrl = nextStop ? `https://www.google.com/maps/dir/?api=1&destination=${nextStop.lat}%2C${nextStop.lon}&travelmode=driving&dir_action=navigate` : ''
   return <section className="route-details" aria-label="Route details"><div className="route-details-heading"><div><span className="card-date-label">{locked ? 'LOCKED ROUTE PREVIEW' : 'ROUTE PREVIEW · STILL FORMING'}</span><h3>{block.startLocation} route</h3></div>{!locked && <span className="route-building-label"><i /> Route can still change</span>}</div>
     <div className="route-map-frame"><RouteMap points={routePoints} stops={stops} /></div>
-    <div className="route-map-caption">{routeState === 'ready' ? 'Route line from Hitch routing · OpenStreetMap' : routeState === 'loading' ? 'Loading route geometry from Hitch…' : 'Routing preview unavailable · showing planned stop order'}</div>
+    <div className="route-map-caption">{routeState === 'ready' ? 'Road route from Hitch routing · OpenStreetMap' : routeState === 'loading' ? 'Loading route geometry from Hitch…' : 'Road geometry unavailable · showing stop locations only'}</div>
     <div className="route-stop-list">{stops.map((stop, index) => <a className={`route-stop-row ${stop.type}`} key={stop.id} href={`https://www.google.com/maps/dir/?api=1&destination=${stop.lat}%2C${stop.lon}&travelmode=driving&dir_action=navigate`} aria-label={`Get Google Maps directions to ${stop.label}`}><span>{stop.type === 'pickup' ? 'P' : stop.type === 'dropoff' ? 'D' : stop.type === 'carrier_dropoff' ? 'C' : 'S'}</span><small>{String(index + 1).padStart(2, '0')}</small><strong>{stop.label}</strong><b>Directions ↗</b></a>)}</div>
     <div className="navigation-panel">{!progress?.started ? <><div><span className="navigation-icon">➤</span><div><strong>{locked ? 'Ready to start?' : 'Route is still forming'}</strong><small>{locked ? 'Start when you are ready to head out.' : 'Navigation becomes available once Hitch locks your route.'}</small></div></div>{locked ? <button className="start-route-button" onClick={startRoute}>Start route <span>→</span></button> : <button className="start-route-button disabled" disabled>Start route <span>◷</span></button>}</> : progress.complete ? <div className="route-complete"><span>✓</span><div><strong>Route complete</strong><small>All stops have been marked complete.</small></div></div> : <><div className="next-stop-heading"><span className={`next-stop-marker ${nextStop.type}`}>{nextStop.type === 'pickup' ? 'P' : nextStop.type === 'carrier_dropoff' ? 'C' : 'D'}</span><div><small>NEXT STOP · {nextStop.type.replace('_', ' ').toUpperCase()}</small><strong>{nextStop.label.replace(/^(Pickup|Drop-off|Etsy pickup|Carrier drop-off) · /, '')}</strong></div><b>{progress.currentStopIndex} of {stops.length - 1}</b></div><a className="navigate-button" href={mapsUrl}>Navigate to this stop in Google Maps <span>↗</span></a><button className="complete-stop-button" onClick={completeStop}>Mark stop complete <span>✓</span></button></>}</div>
     <div className="fuel-stop-card"><span className="fuel-stop-icon">⛽</span><div><small>SUGGESTED FUEL STOP NEAR YOUR ROUTE</small><strong>{routeRecord?.fuel_suggestions?.[0]?.name || 'Maverik · 1450 S 700 E, Salt Lake City'}</strong><span>{routeRecord?.fuel_suggestions?.[0] ? `${routeRecord.fuel_suggestions[0].price_label} · ${routeRecord.fuel_suggestions[0].detour_label}` : 'Sample lowest price nearby · $3.19 / gal · approx. 4 min detour'}</span></div><b>↗</b></div>
@@ -507,21 +590,22 @@ function RouteDetails({ block, locked }) {
 
 function DriverDashboard() {
   const [selectedRoute, setSelectedRoute] = React.useState(null)
-  const [, setClock] = React.useState(Date.now())
+  const [, setClock] = React.useState(demoNow().getTime())
   React.useEffect(() => {
-    const interval = window.setInterval(() => setClock(Date.now()), 60_000)
+    const interval = window.setInterval(() => setClock(demoNow().getTime()), 60_000)
     return () => window.clearInterval(interval)
   }, [])
   const blocks = getAvailability().sort((a, b) => new Date(a.start) - new Date(b.start))
   const [lastMinuteAccepted, setLastMinuteAccepted] = React.useState(() => localStorage.getItem('hitch-driver-last-minute-interest') === 'sent')
   const [showExtraRoute, setShowExtraRoute] = React.useState(false)
-  const extraWindowStart = new Date(Date.now() + 60 * 60_000)
+  const extraWindowStart = new Date(demoNow().getTime() + 60 * 60_000)
   extraWindowStart.setMinutes(Math.ceil(extraWindowStart.getMinutes() / 30) * 30, 0, 0)
   const extraWindowEnd = new Date(extraWindowStart.getTime() + 30 * 60_000)
   return <main className="carrier-app driver-app">
     <DriverHeader />
     <section className="carrier-welcome"><div className="carrier-kicker"><i /> CARRIER MODE · SALT LAKE CITY</div><h1>Hey, Jordan <span>✳</span></h1><p>Ready when you are. Set your hours and we’ll find deliveries along the way.</p></section>
-    <section className={`last-minute-request ${showExtraRoute ? 'route-open' : ''}`}><div className="last-minute-summary"><div className="last-minute-symbol">＋</div><div className="last-minute-copy"><span>LAST-MINUTE CAPACITY REQUEST · SHIPPER NEEDS HELP</span><h2>Extra pickup coverage needed</h2><p>Acme Goods · Sugar House, Salt Lake City</p><div className="last-minute-window"><small>PICKUP WINDOW · BE THERE BETWEEN</small><strong>{formatDateTime(extraWindowStart)} – {extraWindowEnd.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</strong><small>3 packed orders · about 4 package spots</small></div></div><div className="last-minute-actions"><button type="button" className="view-extra-route" aria-expanded={showExtraRoute} onClick={() => setShowExtraRoute(value => !value)}>{showExtraRoute ? 'Hide route' : 'View route'} <span>{showExtraRoute ? '⌃' : '⌄'}</span></button><button type="button" className={lastMinuteAccepted ? 'last-minute-accepted' : ''} onClick={() => { localStorage.setItem('hitch-driver-last-minute-interest', 'sent'); setLastMinuteAccepted(true) }}>{lastMinuteAccepted ? 'Interest sent ✓' : 'I can cover this →'}</button></div></div>{showExtraRoute && <div className="extra-route-preview"><div className="extra-route-heading"><div><span>ROUTE PREVIEW · SAMPLE ESTIMATE</span><strong>About 1 hr 20 min · 4 stops</strong></div><small>Check the stops and timing before you decide.</small></div><div className="extra-route-map"><RouteMap points={lastMinuteRouteStops.map(({ lat, lon }) => ({ lat, lon }))} stops={lastMinuteRouteStops} /></div><div className="extra-route-stops">{lastMinuteRouteStops.slice(1).map((stop, index) => <a key={stop.id} href={`https://www.google.com/maps/dir/?api=1&destination=${stop.lat}%2C${stop.lon}&travelmode=driving&dir_action=navigate`}><span>{stop.type === 'pickup' ? 'P' : 'D'}</span><small>{String(index + 1).padStart(2, '0')}</small><strong>{stop.label}</strong><b>Maps ↗</b></a>)}</div></div>}</section>
+    <div className="demo-clock-control"><span>DEMO CLOCK{Number(localStorage.getItem(DEMO_TIME_OFFSET_KEY) || 0) ? ` · +${Number(localStorage.getItem(DEMO_TIME_OFFSET_KEY) || 0)} DAY${Number(localStorage.getItem(DEMO_TIME_OFFSET_KEY) || 0) === 1 ? '' : 'S'}` : ''}</span><button type="button" onClick={advanceDemoDay}>Advance 1 day ↗</button>{Number(localStorage.getItem(DEMO_TIME_OFFSET_KEY) || 0) > 0 && <button type="button" className="demo-clock-reset" onClick={resetDemoClock}>Reset</button>}</div>
+    <section className={`last-minute-request ${showExtraRoute ? 'route-open' : ''}`}><div className="last-minute-summary"><div className="last-minute-symbol">＋</div><div className="last-minute-copy"><span>LAST-MINUTE CAPACITY REQUEST · SHIPPER NEEDS HELP</span><h2>Extra pickup coverage needed</h2><p>Acme Goods · Sugar House, Salt Lake City</p><div className="last-minute-window"><small>PICKUP WINDOW · BE THERE BETWEEN</small><strong>{formatDateTime(extraWindowStart)} – {extraWindowEnd.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</strong><small>3 packed orders · about 4 package spots</small></div></div><div className="last-minute-actions"><button type="button" className="view-extra-route" aria-expanded={showExtraRoute} onClick={() => setShowExtraRoute(value => !value)}>{showExtraRoute ? 'Hide route' : 'View route'} <span>{showExtraRoute ? '⌃' : '⌄'}</span></button><button type="button" className={lastMinuteAccepted ? 'last-minute-accepted' : ''} onClick={() => { localStorage.setItem('hitch-driver-last-minute-interest', 'sent'); setLastMinuteAccepted(true) }}>{lastMinuteAccepted ? 'Interest sent ✓' : 'I can cover this →'}</button></div></div>{showExtraRoute && <div className="extra-route-preview"><div className="extra-route-heading"><div><span>ROUTE PREVIEW · SAMPLE ESTIMATE</span><strong>About 1 hr 20 min · 4 stops</strong></div><small>Check the stops and timing before you decide.</small></div><div className="extra-route-map"><RouteMap points={[]} stops={lastMinuteRouteStops} /></div><p className="extra-route-map-note">Stop locations only · actual road geometry will appear when dispatch provides the Valhalla route.</p><div className="extra-route-stops">{lastMinuteRouteStops.slice(1).map((stop, index) => <a key={stop.id} href={`https://www.google.com/maps/dir/?api=1&destination=${stop.lat}%2C${stop.lon}&travelmode=driving&dir_action=navigate`}><span>{stop.type === 'pickup' ? 'P' : 'D'}</span><small>{String(index + 1).padStart(2, '0')}</small><strong>{stop.label}</strong><b>Maps ↗</b></a>)}</div></div>}</section>
     <section className="earnings-card"><div><span>YOUR EARNINGS TODAY</span><strong>$64.50</strong><small>3 deliveries completed</small></div><div className="earnings-spark">↗<span>+18%</span></div></section>
     <section className="availability-section"><div className="availability-heading"><div><span>YOUR ROUTE SCHEDULE</span><h2>My availability <b>{blocks.length}</b></h2></div><a href="/carrier/availability" className="add-availability">＋ <span>Schedule</span></a></div>
       {blocks.length > 0 && <div className="availability-list">{blocks.map(block => { const selected = selectedRoute === block.id; const locked = dispatchIsLocked(block); return <div className="route-entry" key={block.id}><AvailabilityCard block={block} selected={selected} onClick={() => { if (locked) window.location.href = `/carrier/route/${encodeURIComponent(block.id)}`; else setSelectedRoute(selected ? null : block.id) }} />{selected && !locked && <FormingRouteDetails block={block} />}</div> })}</div>}
@@ -620,7 +704,7 @@ function ScheduleAvailability() {
     const start = data.get('start')
     const end = data.get('end')
     if (!selectedVehicle) return setError('Add a vehicle to your garage before scheduling availability.')
-    if (new Date(start) <= new Date()) return setError('Choose a start time in the future.')
+    if (new Date(start) <= demoNow()) return setError('Choose a start time in the future.')
     if (new Date(end) <= new Date(start)) return setError('Your end time needs to be after your start time.')
     const block = {
       id: `availability-${Date.now()}`, startLocation: data.get('location').trim(), fuel,

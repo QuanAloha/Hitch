@@ -9,6 +9,7 @@ Hitch connects local pickup and delivery opportunities with independent drivers,
 - **Frontend:** React + Vite (`http://localhost:5173`)
 - **API:** FastAPI (`http://localhost:8000`, interactive docs at `/docs`)
 - **Routing:** Valhalla (`http://localhost:8002`)
+- **Geocoding:** Local Nominatim (`http://localhost:8080`)
 - **Database:** PostgreSQL 16 (`localhost:5432`)
 
 ## Run locally with Docker Compose
@@ -29,7 +30,9 @@ The API health endpoint is at [http://localhost:8000/health](http://localhost:80
 
 The carrier demo has a bottom navigation bar for Home, Availability, Activity, and Profile. Use **Availability** to set a starting location, departure fuel, vehicle package capacity, and available time window. Availability blocks are saved in that browser's local storage; the dashboard displays sample shipper bookings and locks dispatch when departure is within 24 hours.
 
-The first Valhalla startup downloads the Utah OpenStreetMap extract and builds routing graph tiles. This can take several minutes and requires several gigabytes of disk space. The generated graph and database are kept in Docker volumes across restarts. To delete all stored data, run `docker compose down -v`.
+The first Valhalla startup downloads the Utah OpenStreetMap extract and builds routing graph tiles. The local Nominatim service also downloads and imports the Utah extract the first time it starts; address search will be unavailable until that import completes. Both services can take several minutes and require several gigabytes of disk space. Their data is kept in Docker volumes across restarts. To delete all stored data, run `docker compose down -v`.
+
+Seller pickup and delivery address fields use an explicit **Find address** search against the local Nominatim service; they do not send addresses to a public geocoding service or issue autocomplete requests. Select a matching result to save its latitude and longitude with the demo request. The Utah extract supports addresses in Utah; out-of-state shipping destinations should continue through their parcel carrier/3PL flow. Address search results and maps attribute OpenStreetMap contributors.
 
 ## API starter endpoints
 

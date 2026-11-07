@@ -14,7 +14,7 @@ This note lists the data the current frontend needs from the API and a suggested
 
 There are not yet API endpoints for orders, seller pickup requests, pickup runs, freight summaries, driver vehicles, availability, route assignments, stop completion, or payout receipts.
 
-The frontend currently fills those gaps with hard-coded examples and browser `localStorage`. The Vite dev server already proxies `/api` and `/health` to FastAPI.
+The frontend currently fills those gaps with hard-coded examples and browser `localStorage`. The Vite dev server proxies `/api` and `/health` to FastAPI and `/geocoding` to the local Nominatim container. Seller-entered pickup, delivery, and carrier drop-off addresses are searched only after the user clicks **Find address**; a selected result supplies coordinates for the request. No client-side autocomplete is used.
 
 ## Product rules the API should preserve
 
@@ -86,6 +86,8 @@ Suggested create body:
 The response should return the request ID, status (for example, `awaiting_driver`, `assigned`, `picked_up`, `delivered`, `cancelled`), any assigned driver/run, and the confirmed pickup window. Keep a seller-provided availability window distinct from a backend-confirmed pickup window.
 
 Dimensions must be stored with units and passed into dispatch/capacity checks. A TV and a small handheld item must not be treated as interchangeable just because both are one package.
+
+Pickup and delivery addresses selected in the current seller forms include latitude/longitude in browser demo records. When wiring these requests to the API, pass the chosen coordinates with the address and use them directly for routing rather than geocoding the same address again. The local Nominatim instance currently imports the Utah Geofabrik extract, so the demo geocoder is intended for Utah pickup/delivery locations; out-of-area parcel-carrier destinations may remain address-only. Do not silently switch residential addresses to the public Nominatim service.
 
 ### 2a. Etsy carrier batches
 
