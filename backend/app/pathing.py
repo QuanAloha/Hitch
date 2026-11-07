@@ -9,7 +9,7 @@ from dummy_valhalla import (
 )
 
 MAXIMUM_NODE_SIZE = 3600  # Seconds (1 hour)
-MAXIMUM_DESTINATION_TIME = 2.0  # NOTE: See explanation below
+MAXIMUM_DESTINATION_TIME = 15.0  # NOTE: See explanation below
 
 
 @dataclass
@@ -38,18 +38,28 @@ async def calculate_route_time(
     locations: list[dict]
 ) -> float:
     """
-    Calculate total route time using dummy Valhalla.
-    Returns time in seconds.
+    Calculate total route time by generating routes
+    between consecutive locations.
+
+    Returns total time in seconds.
     """
 
     if len(locations) < 2:
         return 0.0
 
-    result = await generate_route(locations)
+    total_time = 0.0
 
-    # Dummy API returns minutes; clustering uses seconds.
-    return result["route_time"] * 60
+    for i in range(len(locations) - 1):
 
+        result = await generate_route([
+            locations[i],
+            locations[i + 1]
+        ])
+
+        # Dummy Valhalla returns minutes.
+        total_time += result["route_time"] * 60
+
+    return total_time
 
 async def defineClusters(
     route_pool: list[location_node],

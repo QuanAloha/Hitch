@@ -78,7 +78,7 @@ def generate_route_time() -> int:
     Generate a simulated route duration in minutes.
     """
 
-    return random.randint(5, 120)
+    return random.randint(5, 15)
 
 
 # ==========================================
