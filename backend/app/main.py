@@ -20,17 +20,44 @@ app.add_middleware(
 )
 
 
-class RouteRequest(BaseModel):
-    locations: list[dict] = Field(
-        min_length=2,
-        examples=[
-            [
-                {"lat": 40.7608, "lon": -111.891},
-                {"lat": 40.2338, "lon": -111.6585},
-            ]
-        ],
-    )
-    costing: str = "auto"
+@app.post("/route")
+async def get_route(request: RouteRequest):
+    payload = {
+        "locations": request.locations,
+        "costing": request.costing,
+        "units": "miles",
+        "directions_type": "instructions",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{VALHALLA_URL}/route",
+                json=payload,
+            )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Valhalla routing failed",
+                    "valhalla_error": response.text,
+                },
+            )
+
+        return response.json()
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Valhalla routing request timed out",
+        )
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not connect to Valhalla",
+        )
 
 
 @app.get("/")
