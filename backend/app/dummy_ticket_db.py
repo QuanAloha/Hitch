@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from dummy_valhalla import location_node
+from app.models import location_node
 
 
 # ==========================================

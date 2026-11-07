@@ -5,21 +5,22 @@ import random
 import uuid
 from pathlib import Path
 
-from dummy_ticket_db import (
+from app.dummy_ticket_db import (
     create_ticket,
     get_all_tickets,
     clear_database,
 )
-
-from dummy_valhalla import location_node
-
-from pathing import (
-    defineClusters,
-    routes_from_clusters,
-    location_cluster,
-    route_stop,
+from app.dummy_valhalla import generate_route
+from app.models import (
     MAXIMUM_NODE_SIZE,
     MAXIMUM_DESTINATION_TIME,
+    location_cluster,
+    location_node,
+    route_stop,
+)
+from app.pathing import (
+    defineClusters,
+    routes_from_clusters,
 )
 
 
@@ -27,7 +28,7 @@ from pathing import (
 # CONFIGURATION
 # ==========================================
 
-NUMBER_OF_TICKETS = 100
+NUMBER_OF_TICKETS = 10
 
 # Salt Lake City metro coordinates
 LAT_MIN = 40.70

@@ -1,89 +1,27 @@
 import os
 import uuid
 import math
-from dataclasses import dataclass
-from typing import Optional, Any
 
 import httpx
 import psycopg
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 
-
-# ==========================================
-# CONFIGURATION
-# ==========================================
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://hitch:hitch_dev_password@localhost:5432/hitch",
+from app.database import (
+    get_route,
+    initialize_database,
+    list_routes,
+    save_route,
 )
+from app.models import Route, RouteRequest, location_node  # noqa: F401  (re-exported)
+
 VALHALLA_URL = os.getenv("VALHALLA_URL", "http://localhost:8002").rstrip("/")
 
 app = FastAPI(title="Dummy Valhalla API", version="0.3.0")
-_database_initialized = False
-
-
-# ==========================================
-# DATA STRUCTURES
-# ==========================================
-
-@dataclass
-class location_node:
-    node_type: str
-    stop_id: str
-    origin: Optional[dict[str, Any]] = None
-    destination: Optional[dict[str, Any]] = None
-
-
-# ==========================================
-# DATABASE
-# ==========================================
-
-def get_db_connection():
-    return psycopg.connect(DATABASE_URL, connect_timeout=5)
-
-
-def initialize_database() -> None:
-    """Create the routes table once; safe to call from scripts or API startup."""
-    global _database_initialized
-    if _database_initialized:
-        return
-
-    try:
-        with get_db_connection() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS routes (
-                    route_id UUID PRIMARY KEY,
-                    origin JSONB NOT NULL,
-                    destination JSONB NOT NULL,
-                    costing TEXT NOT NULL,
-                    route_plan JSONB NOT NULL,
-                    route_time_minutes DOUBLE PRECISION NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-        _database_initialized = True
-    except psycopg.Error as exc:
-        raise RuntimeError(
-            f"Could not initialize PostgreSQL table using DATABASE_URL={DATABASE_URL!r}"
-        ) from exc
 
 
 @app.on_event("startup")
 def startup() -> None:
     initialize_database()
-
-
-# ==========================================
-# API REQUEST MODEL
-# ==========================================
-
-class RouteRequest(BaseModel):
-    locations: list[dict[str, Any]] = Field(min_length=2, max_length=2)
-    costing: str = "auto"
 
 
 # ==========================================
@@ -128,7 +66,7 @@ def _haversine_miles(origin: dict, destination: dict) -> float:
 
 
 def _build_dummy_route_plan(
-    origin: dict, destination: dict, costing: str, reason: str
+    locations: list[dict], costing: str, reason: str
 ) -> tuple[dict, float]:
     """
     Build an explicitly-marked approximate route when Valhalla is unreachable.
@@ -143,7 +81,9 @@ def _build_dummy_route_plan(
         "bicycle": 10.0,
         "pedestrian": 3.0,
     }
-    straight_line_miles = _haversine_miles(origin, destination)
+    straight_line_miles = sum(
+        _haversine_miles(a, b) for a, b in zip(locations, locations[1:])
+    )
     estimated_road_miles = straight_line_miles * 1.3
     average_speed = average_speeds_mph.get(costing, 30.0)
     duration_seconds = (
@@ -163,7 +103,7 @@ def _build_dummy_route_plan(
                 "time": duration_seconds,
                 "length": estimated_road_miles,
             },
-            "locations": [origin, destination],
+            "locations": locations,
             "legs": [],
         },
     }
@@ -178,16 +118,16 @@ async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
 
     This function is intentionally usable directly by pathing.py and by FastAPI.
     """
-    if len(locations) != 2:
-        raise ValueError("Exactly two locations required")
+    if len(locations) < 2:
+        raise ValueError("At least two locations required")
 
-    _validate_location(locations[0], 1)
-    _validate_location(locations[1], 2)
+    for index, location in enumerate(locations, start=1):
+        _validate_location(location, index)
 
     # Copy the caller's dictionaries; don't mutate their input objects.
+    # Every stop is a "break" so Valhalla returns one leg per consecutive pair.
     valhalla_locations = [
-        {**locations[0], "type": locations[0].get("type", "break")},
-        {**locations[1], "type": locations[1].get("type", "break")},
+        {**location, "type": location.get("type", "break")} for location in locations
     ]
     payload = {
         "locations": valhalla_locations,
@@ -207,8 +147,7 @@ async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
         # unreachable. Use a dummy estimate so offline development can proceed.
         route_source = "dummy_fallback"
         route_plan, duration_seconds = _build_dummy_route_plan(
-            locations[0],
-            locations[1],
+            locations,
             costing,
             reason=f"{type(exc).__name__}: {str(exc) or 'Valhalla unavailable'}",
         )
@@ -238,25 +177,15 @@ async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
     route_id = str(uuid.uuid4())
 
     try:
-        initialize_database()
-        with get_db_connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO routes (
-                    route_id, origin, destination, costing,
-                    route_plan, route_time_minutes
-                )
-                VALUES (%s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s)
-                """,
-                (
-                    route_id,
-                    psycopg.types.json.Jsonb(locations[0]),
-                    psycopg.types.json.Jsonb(locations[1]),
-                    costing,
-                    psycopg.types.json.Jsonb(route_plan),
-                    route_time_minutes,
-                ),
+        save_route(
+            Route(
+                route_id=route_id,
+                locations=locations,
+                costing=costing,
+                route_time_minutes=route_time_minutes,
+                route_plan=route_plan,
             )
+        )
     except psycopg.Error as exc:
         raise HTTPException(
             status_code=503,
@@ -276,44 +205,40 @@ async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
 # DATABASE RETRIEVAL
 # ==========================================
 
-def get_stored_route(route_id: str) -> dict:
+def get_stored_route(route_id: str) -> Route:
+    """Load a persisted route as a Route dataclass."""
     try:
         parsed_id = uuid.UUID(route_id)
     except (ValueError, TypeError, AttributeError) as exc:
         raise HTTPException(status_code=422, detail="route_id must be a valid UUID.") from exc
 
     try:
-        initialize_database()
-        with get_db_connection() as connection:
-            row = connection.execute(
-                """
-                SELECT route_id, origin, destination, costing,
-                       route_plan, route_time_minutes, created_at
-                FROM routes
-                WHERE route_id = %s
-                """,
-                (parsed_id,),
-            ).fetchone()
-    except psycopg.Error as exc:
+        route = get_route(str(parsed_id))
+    except (psycopg.Error, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail="Database unavailable.") from exc
 
-    if row is None:
+    if route is None:
         raise HTTPException(status_code=404, detail="Route not found.")
-
-    return {
-        "route_id": str(row[0]),
-        "origin": row[1],
-        "destination": row[2],
-        "costing": row[3],
-        "route_plan": row[4],
-        "route_time": row[5],
-        "created_at": row[6],
-    }
+    return route
 
 
-async def retrieve_route(route_id: str) -> dict:
+async def retrieve_route(route_id: str) -> Route:
     """Async-compatible helper used by pathing.py; reads the persisted route."""
     return get_stored_route(route_id)
+
+
+def route_to_response(route: Route) -> dict:
+    """JSON shape returned by the API for a stored route."""
+    return {
+        "route_id": route.route_id,
+        "origin": route.origin,
+        "destination": route.destination,
+        "locations": route.locations,
+        "costing": route.costing,
+        "route_plan": route.route_plan,
+        "route_time": route.route_time_minutes,
+        "created_at": route.created_at,
+    }
 
 
 # ==========================================
@@ -321,42 +246,26 @@ async def retrieve_route(route_id: str) -> dict:
 # ==========================================
 
 @app.post("/route")
-async def get_route(request: RouteRequest):
+async def get_route_endpoint(request: RouteRequest):
     return await generate_route(request.locations, request.costing)
 
 
 @app.get("/route/{route_id}")
 def get_route_by_id(route_id: str):
-    return get_stored_route(route_id)
+    return route_to_response(get_stored_route(route_id))
 
 
 @app.get("/routes")
 def get_all_routes():
     try:
-        initialize_database()
-        with get_db_connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT route_id, origin, destination, costing,
-                       route_time_minutes, created_at
-                FROM routes
-                ORDER BY created_at DESC
-                """
-            ).fetchall()
-    except psycopg.Error as exc:
+        routes = list_routes()
+    except (psycopg.Error, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail="Database unavailable.") from exc
 
     return {
-        "total_routes": len(rows),
+        "total_routes": len(routes),
         "routes": [
-            {
-                "route_id": str(row[0]),
-                "origin": row[1],
-                "destination": row[2],
-                "costing": row[3],
-                "route_time": row[4],
-                "created_at": row[5],
-            }
-            for row in rows
+            {k: v for k, v in route_to_response(route).items() if k != "route_plan"}
+            for route in routes
         ],
     }

@@ -1,32 +1,16 @@
-
-from dataclasses import dataclass, field
-
-from dummy_valhalla import (
-    location_node,
-    generate_route,
-)
-
-from dummy_database import (
+from app.dummy_valhalla import generate_route
+from app.dummy_ticket_db import (
     delivery_ticket,
     get_all_tickets,
 )
+from app.models import (
+    MAXIMUM_DESTINATION_TIME,
+    MAXIMUM_NODE_SIZE,
+    location_cluster,
+    location_node,
+    route_stop,
+)
 
-MAXIMUM_NODE_SIZE = 3600  # Seconds (1 hour)
-MAXIMUM_DESTINATION_TIME = 15.0  # Minutes
-
-
-@dataclass
-class location_cluster:
-    cluster_type: str
-    locations: list[location_node] = field(default_factory=list)
-    ticket_ids: list[str] = field(default_factory=list)
-    total_time: float = 0.0
-    maximum_size: float = MAXIMUM_NODE_SIZE
-
-@dataclass
-class route_stop:
-    location: dict
-    order_id: str
 
 async def destination_distance(a: dict, b: dict) -> float:
     """

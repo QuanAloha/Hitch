@@ -3,13 +3,15 @@ import os
 import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
-from dummy_valhalla import (
+from app.models import RouteRequest
+from app.dummy_valhalla import (
     generate_route,
     get_stored_route,
-    initialize_database,
+    route_to_response,
 )
+from app.database import initialize_database
+from app.frontend_routes import router as frontend_router
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -25,18 +27,7 @@ app.add_middleware(
 )
 
 
-class RouteRequest(BaseModel):
-    locations: list[dict] = Field(
-        min_length=2,
-        max_length=2,
-        examples=[
-            [
-                {"lat": 40.7608, "lon": -111.891},
-                {"lat": 40.2338, "lon": -111.6585},
-            ]
-        ],
-    )
-    costing: str = "auto"
+app.include_router(frontend_router)
 
 
 @app.on_event("startup")
@@ -77,4 +68,4 @@ async def create_route(request: RouteRequest):
 @app.get("/route/{route_id}")
 @app.get("/api/route/{route_id}")
 def route_by_id(route_id: str):
-    return get_stored_route(route_id)
+    return route_to_response(get_stored_route(route_id))
