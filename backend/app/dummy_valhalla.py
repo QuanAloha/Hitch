@@ -81,16 +81,21 @@ def _build_dummy_route_plan(
         "bicycle": 10.0,
         "pedestrian": 3.0,
     }
-    straight_line_miles = sum(
-        _haversine_miles(a, b) for a, b in zip(locations, locations[1:])
-    )
-    estimated_road_miles = straight_line_miles * 1.3
     average_speed = average_speeds_mph.get(costing, 30.0)
-    duration_seconds = (
-        estimated_road_miles / average_speed * 3600.0
-        if estimated_road_miles > 0
-        else 0.0
-    )
+    legs = []
+    estimated_road_miles = 0.0
+    duration_seconds = 0.0
+    for origin, destination in zip(locations, locations[1:]):
+        # Road-distance multiplier: roads are less direct than a straight line.
+        road_miles = _haversine_miles(origin, destination) * 1.3
+        leg_seconds = road_miles / average_speed * 3600.0 if road_miles > 0 else 0.0
+        estimated_road_miles += road_miles
+        duration_seconds += leg_seconds
+        legs.append({
+            "from": origin,
+            "to": destination,
+            "summary": {"time": leg_seconds, "length": road_miles},
+        })
     route_plan = {
         "dummy_fallback": True,
         "fallback_reason": reason,
@@ -104,7 +109,7 @@ def _build_dummy_route_plan(
                 "length": estimated_road_miles,
             },
             "locations": locations,
-            "legs": [],
+            "legs": legs,
         },
     }
     return route_plan, duration_seconds
@@ -165,7 +170,7 @@ async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
         try:
             # Valhalla trip.summary.time is seconds, regardless of distance units.
             duration_seconds = float(route_plan["trip"]["summary"]["time"])
-            if duration_seconds < 0:
+            if not math.isfinite(duration_seconds) or duration_seconds < 0:
                 raise ValueError("Negative route duration")
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(

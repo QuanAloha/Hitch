@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 # ==========================================
 
 MAXIMUM_NODE_SIZE = 3600  # Seconds (1 hour)
-MAXIMUM_DESTINATION_TIME = 15.0  # Minutes
+MAXIMUM_DESTINATION_TIME = 30.0  # Minutes
 
 
 # ==========================================
@@ -33,20 +33,20 @@ class location_node:
 
 
 @dataclass
-class location_cluster:
-    """A group of location nodes served together, bounded by total time."""
-    cluster_type: str
-    locations: list[location_node] = field(default_factory=list)
-    ticket_ids: list[str] = field(default_factory=list)  # Parallel to `locations`
-    total_time: float = 0.0  # Seconds
-    maximum_size: float = MAXIMUM_NODE_SIZE
+class route_stop:
+    """One ordered stop on a route, tagged with the ticket it serves."""
+    location: dict[str, Any]
+    order_id: str
+    is_pickup: bool
 
 
 @dataclass
-class route_stop:
-    """One ordered stop on a courier route, tagged with the ticket it serves."""
-    location: dict[str, Any]
-    order_id: str
+class location_cluster:
+    """A group of pickup/delivery stops served together, bounded by total time."""
+    cluster_type: str
+    locations: list[route_stop] = field(default_factory=list)
+    total_time: float = 0.0  # Seconds
+    maximum_size: float = MAXIMUM_NODE_SIZE
 
 
 @dataclass

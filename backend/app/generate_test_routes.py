@@ -88,16 +88,14 @@ def print_clusters(clusters: list[location_cluster]):
         print("-" * 40)
 
         print(f"Type: {cluster.cluster_type}")
-        print(f"Tickets: {len(cluster.ticket_ids)}")
+        print(f"Tickets: {len({stop.order_id for stop in cluster.locations})}")
+        print(f"Stops: {len(cluster.locations)}")
         print(f"Total route time: {cluster.total_time:.2f} seconds")
 
-        for node, ticket_id in zip(
-            cluster.locations,
-            cluster.ticket_ids
-        ):
-            print(f"\n  Ticket ID: {ticket_id}")
-            print(f"  Origin: {node.origin}")
-            print(f"  Destination: {node.destination}")
+        for stop in cluster.locations:
+            kind = "Pickup" if stop.is_pickup else "Delivery"
+            print(f"\n  Ticket ID: {stop.order_id}")
+            print(f"  {kind}: {stop.location}")
 
         print(
             f"\n  Within time limit: "
@@ -145,15 +143,13 @@ def serialize_cluster(cluster: location_cluster) -> dict:
         "cluster_type": cluster.cluster_type,
         "total_time": cluster.total_time,
         "maximum_size": cluster.maximum_size,
-        "ticket_ids": cluster.ticket_ids,
         "locations": [
             {
-                "stop_id": node.stop_id,
-                "node_type": node.node_type,
-                "origin": node.origin,
-                "destination": node.destination,
+                "order_id": stop.order_id,
+                "is_pickup": stop.is_pickup,
+                "location": stop.location,
             }
-            for node in cluster.locations
+            for stop in cluster.locations
         ],
     }
 
@@ -176,6 +172,7 @@ def serialize_route(
             {
                 "location": stop.location,
                 "order_id": stop.order_id,
+                "is_pickup": stop.is_pickup,
             }
             for stop in route
         ],
