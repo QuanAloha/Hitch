@@ -1,11 +1,13 @@
-import os
+
 import uuid
 import math
+
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 import httpx
-import psycopg
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -14,14 +16,10 @@ from pydantic import BaseModel, Field
 # CONFIGURATION
 # ==========================================
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://hitch:hitch_dev_password@localhost:5432/hitch",
-)
-VALHALLA_URL = os.getenv("VALHALLA_URL", "http://localhost:8002").rstrip("/")
+VALHALLA_URL = "http://localhost:8002"
+MAX_STORED_ROUTES = 1000
 
-app = FastAPI(title="Dummy Valhalla API", version="0.3.0")
-_database_initialized = False
+app = FastAPI(title="Dummy Valhalla API", version="0.5.0")
 
 
 # ==========================================
@@ -36,45 +34,40 @@ class location_node:
     destination: Optional[dict[str, Any]] = None
 
 
+@dataclass
+class stored_route:
+    route_id: str
+    origin: dict
+    destination: dict
+    locations: list[dict]
+    costing: str
+    route_plan: dict
+    route_time: float
+    created_at: str
+
+
 # ==========================================
-# DATABASE
+# IN-MEMORY DATABASE
 # ==========================================
 
-def get_db_connection():
-    return psycopg.connect(DATABASE_URL, connect_timeout=5)
+_route_database: dict[str, stored_route] = {}
 
 
-def initialize_database() -> None:
-    """Create the routes table once; safe to call from scripts or API startup."""
-    global _database_initialized
-    if _database_initialized:
-        return
-
-    try:
-        with get_db_connection() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS routes (
-                    route_id UUID PRIMARY KEY,
-                    origin JSONB NOT NULL,
-                    destination JSONB NOT NULL,
-                    costing TEXT NOT NULL,
-                    route_plan JSONB NOT NULL,
-                    route_time_minutes DOUBLE PRECISION NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-        _database_initialized = True
-    except psycopg.Error as exc:
-        raise RuntimeError(
-            f"Could not initialize PostgreSQL table using DATABASE_URL={DATABASE_URL!r}"
-        ) from exc
+def clear_database():
+    _route_database.clear()
 
 
-@app.on_event("startup")
-def startup() -> None:
-    initialize_database()
+def get_all_routes() -> list[stored_route]:
+    return list(_route_database.values())
+
+
+def _store_route(route: stored_route):
+
+    _route_database[route.route_id] = route
+
+    while len(_route_database) > MAX_STORED_ROUTES:
+        oldest_route_id = next(iter(_route_database))
+        del _route_database[oldest_route_id]
 
 
 # ==========================================
@@ -82,60 +75,77 @@ def startup() -> None:
 # ==========================================
 
 class RouteRequest(BaseModel):
-    locations: list[dict[str, Any]] = Field(min_length=2, max_length=2)
+
+    # Now supports any number of locations >= 2.
+    locations: list[dict[str, Any]] = Field(
+        min_length=2
+    )
+
     costing: str = "auto"
 
 
 # ==========================================
-# ROUTE GENERATION / PERSISTENCE
+# LOCATION VALIDATION
 # ==========================================
 
-def _validate_location(location: dict, index: int) -> None:
+def _validate_location(location: dict, index: int):
+
     if not isinstance(location, dict):
-        raise HTTPException(status_code=422, detail=f"Location {index} must be an object.")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Location {index} must be an object."
+        )
 
     try:
         lat = float(location["lat"])
         lon = float(location["lon"])
+
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=422,
-            detail=f"Location {index} must contain numeric 'lat' and 'lon' fields.",
+            detail=f"Location {index} must contain numeric lat and lon."
         ) from exc
 
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise HTTPException(
             status_code=422,
-            detail=f"Location {index} has coordinates outside valid latitude/longitude ranges.",
+            detail=f"Location {index} has invalid coordinates."
         )
 
 
+# ==========================================
+# DUMMY ROUTING
+# ==========================================
+
 def _haversine_miles(origin: dict, destination: dict) -> float:
-    """Calculate straight-line distance between two coordinates."""
+
     earth_radius_miles = 3958.7613
+
     lat1 = math.radians(float(origin["lat"]))
     lon1 = math.radians(float(origin["lon"]))
+
     lat2 = math.radians(float(destination["lat"]))
     lon2 = math.radians(float(destination["lon"]))
 
     delta_lat = lat2 - lat1
     delta_lon = lon2 - lon1
+
     a = (
         math.sin(delta_lat / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+        + math.cos(lat1)
+        * math.cos(lat2)
+        * math.sin(delta_lon / 2) ** 2
     )
+
     return 2 * earth_radius_miles * math.asin(math.sqrt(a))
 
 
 def _build_dummy_route_plan(
-    origin: dict, destination: dict, costing: str, reason: str
+    locations: list[dict],
+    costing: str,
+    reason: str = "Dummy routing enabled"
 ) -> tuple[dict, float]:
-    """
-    Build an explicitly-marked approximate route when Valhalla is unreachable.
-    This estimates duration from straight-line distance, not road geometry.
-    """
-    # Approximate average speeds in miles per hour. A road-distance multiplier
-    # accounts roughly for roads being less direct than a straight line.
+
     average_speeds_mph = {
         "auto": 30.0,
         "motorcycle": 35.0,
@@ -143,132 +153,180 @@ def _build_dummy_route_plan(
         "bicycle": 10.0,
         "pedestrian": 3.0,
     }
-    straight_line_miles = _haversine_miles(origin, destination)
-    estimated_road_miles = straight_line_miles * 1.3
+
     average_speed = average_speeds_mph.get(costing, 30.0)
-    duration_seconds = (
-        estimated_road_miles / average_speed * 3600.0
-        if estimated_road_miles > 0
-        else 0.0
-    )
+
+    total_distance = 0.0
+    total_duration = 0.0
+
+    legs = []
+
+    # Calculate every consecutive journey.
+    for index in range(len(locations) - 1):
+
+        origin = locations[index]
+        destination = locations[index + 1]
+
+        straight_line = _haversine_miles(
+            origin,
+            destination
+        )
+
+        road_distance = straight_line * 1.3
+
+        duration = (
+            road_distance / average_speed * 3600.0
+            if road_distance > 0
+            else 0.0
+        )
+
+        total_distance += road_distance
+        total_duration += duration
+
+        legs.append({
+            "from": origin,
+            "to": destination,
+            "summary": {
+                "time": duration,
+                "length": road_distance
+            }
+        })
+
     route_plan = {
         "dummy_fallback": True,
         "fallback_reason": reason,
-        "warning": (
-            "Approximate straight-line estimate; this is not a Valhalla route "
-            "and does not include road geometry or turn-by-turn directions."
-        ),
         "trip": {
             "summary": {
-                "time": duration_seconds,
-                "length": estimated_road_miles,
+                "time": total_duration,
+                "length": total_distance
             },
-            "locations": [origin, destination],
-            "legs": [],
-        },
+            "locations": locations,
+            "legs": legs
+        }
     }
-    return route_plan, duration_seconds
+
+    return route_plan, total_duration
 
 
-async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
+# ==========================================
+# ROUTE GENERATION
+# ==========================================
+
+async def generate_route(
+    locations: list[dict],
+    costing: str = "auto"
+) -> dict:
+
     """
-    Calculate a route with Valhalla, or use a clearly-marked dummy estimate
-    if Valhalla cannot be reached. Persist either result in PostgreSQL and
-    return the database route UUID and journey duration in minutes.
+    Generate a route using any number of locations >= 2.
 
-    This function is intentionally usable directly by pathing.py and by FastAPI.
+    Uses Valhalla when available.
+    Falls back to dummy routing when unavailable.
+
+    Returns:
+        {
+            "route_id": str,
+            "route_time": float,
+            "route_source": str
+        }
+
+    route_time is returned in minutes.
     """
-    if len(locations) != 2:
-        raise ValueError("Exactly two locations required")
 
-    _validate_location(locations[0], 1)
-    _validate_location(locations[1], 2)
+    if len(locations) < 2:
+        raise ValueError(
+            "At least two locations are required."
+        )
 
-    # Copy the caller's dictionaries; don't mutate their input objects.
+    # Validate every location.
+    for index, location in enumerate(locations, start=1):
+        _validate_location(location, index)
+
+    # Copy input locations.
+    locations = [dict(location) for location in locations]
+
+    # Prepare Valhalla locations.
     valhalla_locations = [
-        {**locations[0], "type": locations[0].get("type", "break")},
-        {**locations[1], "type": locations[1].get("type", "break")},
+        {
+            **location,
+            "type": location.get("type", "break")
+        }
+        for location in locations
     ]
+
     payload = {
         "locations": valhalla_locations,
         "costing": costing,
         "units": "miles",
-        "directions_type": "instructions",
+        "directions_type": "instructions"
     }
 
     route_source = "valhalla"
+
     try:
+
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(f"{VALHALLA_URL}/route", json=payload)
+
+            response = await client.post(
+                f"{VALHALLA_URL}/route",
+                json=payload
+            )
+
             response.raise_for_status()
+
             route_plan = response.json()
-    except httpx.RequestError as exc:
-        # Connection failures, DNS errors and timeouts mean Valhalla is
-        # unreachable. Use a dummy estimate so offline development can proceed.
-        route_source = "dummy_fallback"
+
+    except httpx.RequestError:
+
+        route_source = "dummy"
+
         route_plan, duration_seconds = _build_dummy_route_plan(
-            locations[0],
-            locations[1],
-            costing,
-            reason=f"{type(exc).__name__}: {str(exc) or 'Valhalla unavailable'}",
+            locations,
+            costing
         )
-    except httpx.HTTPStatusError as exc:
-        # Valhalla was reachable but rejected the request; don't hide genuine
-        # routing errors behind a fabricated route.
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "Valhalla routing failed.",
-                "valhalla_error": exc.response.text[:2000],
-            },
-        ) from exc
+
     else:
+
         try:
-            # Valhalla trip.summary.time is seconds, regardless of distance units.
-            duration_seconds = float(route_plan["trip"]["summary"]["time"])
-            if duration_seconds < 0:
-                raise ValueError("Negative route duration")
+
+            duration_seconds = float(
+                route_plan["trip"]["summary"]["time"]
+            )
+
+            if not math.isfinite(duration_seconds) or duration_seconds < 0:
+                raise ValueError("Invalid route duration")
+
         except (KeyError, TypeError, ValueError) as exc:
+
             raise HTTPException(
                 status_code=502,
-                detail="Valhalla response did not contain a valid trip.summary.time.",
+                detail="Invalid Valhalla route response."
             ) from exc
 
-    route_time_minutes = round(duration_seconds / 60.0, 2)
+    route_time_minutes = round(
+        duration_seconds / 60.0,
+        2
+    )
+
     route_id = str(uuid.uuid4())
 
-    try:
-        initialize_database()
-        with get_db_connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO routes (
-                    route_id, origin, destination, costing,
-                    route_plan, route_time_minutes
-                )
-                VALUES (%s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s)
-                """,
-                (
-                    route_id,
-                    psycopg.types.json.Jsonb(locations[0]),
-                    psycopg.types.json.Jsonb(locations[1]),
-                    costing,
-                    psycopg.types.json.Jsonb(route_plan),
-                    route_time_minutes,
-                ),
-            )
-    except psycopg.Error as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Route was calculated, but PostgreSQL could not save it.",
-        ) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    route = stored_route(
+        route_id=route_id,
+        origin=locations[0],
+        destination=locations[-1],
+        locations=locations,
+        costing=costing,
+        route_plan=route_plan,
+        route_time=route_time_minutes,
+        created_at=datetime.now(timezone.utc).isoformat()
+    )
+
+    _store_route(route)
 
     return {
         "route_id": route_id,
         "route_time": route_time_minutes,
-        "route_source": route_source,
+        "route_source": route_source
     }
 
 
@@ -277,42 +335,39 @@ async def generate_route(locations: list[dict], costing: str = "auto") -> dict:
 # ==========================================
 
 def get_stored_route(route_id: str) -> dict:
+
     try:
-        parsed_id = uuid.UUID(route_id)
+        uuid.UUID(route_id)
+
     except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(status_code=422, detail="route_id must be a valid UUID.") from exc
 
-    try:
-        initialize_database()
-        with get_db_connection() as connection:
-            row = connection.execute(
-                """
-                SELECT route_id, origin, destination, costing,
-                       route_plan, route_time_minutes, created_at
-                FROM routes
-                WHERE route_id = %s
-                """,
-                (parsed_id,),
-            ).fetchone()
-    except psycopg.Error as exc:
-        raise HTTPException(status_code=503, detail="Database unavailable.") from exc
+        raise HTTPException(
+            status_code=422,
+            detail="route_id must be a valid UUID."
+        ) from exc
 
-    if row is None:
-        raise HTTPException(status_code=404, detail="Route not found.")
+    route = _route_database.get(route_id)
+
+    if route is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Route not found."
+        )
 
     return {
-        "route_id": str(row[0]),
-        "origin": row[1],
-        "destination": row[2],
-        "costing": row[3],
-        "route_plan": row[4],
-        "route_time": row[5],
-        "created_at": row[6],
+        "route_id": route.route_id,
+        "origin": route.origin,
+        "destination": route.destination,
+        "locations": route.locations,
+        "costing": route.costing,
+        "route_plan": route.route_plan,
+        "route_time": route.route_time,
+        "created_at": route.created_at
     }
 
 
 async def retrieve_route(route_id: str) -> dict:
-    """Async-compatible helper used by pathing.py; reads the persisted route."""
     return get_stored_route(route_id)
 
 
@@ -322,41 +377,46 @@ async def retrieve_route(route_id: str) -> dict:
 
 @app.post("/route")
 async def get_route(request: RouteRequest):
-    return await generate_route(request.locations, request.costing)
+
+    return await generate_route(
+        request.locations,
+        request.costing
+    )
 
 
 @app.get("/route/{route_id}")
 def get_route_by_id(route_id: str):
+
     return get_stored_route(route_id)
 
 
 @app.get("/routes")
-def get_all_routes():
-    try:
-        initialize_database()
-        with get_db_connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT route_id, origin, destination, costing,
-                       route_time_minutes, created_at
-                FROM routes
-                ORDER BY created_at DESC
-                """
-            ).fetchall()
-    except psycopg.Error as exc:
-        raise HTTPException(status_code=503, detail="Database unavailable.") from exc
+def get_all_routes_endpoint():
+
+    routes = get_all_routes()
 
     return {
-        "total_routes": len(rows),
+        "total_routes": len(routes),
         "routes": [
             {
-                "route_id": str(row[0]),
-                "origin": row[1],
-                "destination": row[2],
-                "costing": row[3],
-                "route_time": row[4],
-                "created_at": row[5],
+                "route_id": route.route_id,
+                "origin": route.origin,
+                "destination": route.destination,
+                "locations": route.locations,
+                "costing": route.costing,
+                "route_time": route.route_time,
+                "created_at": route.created_at
             }
-            for row in rows
-        ],
+            for route in routes
+        ]
+    }
+
+
+@app.delete("/routes")
+def clear_routes_endpoint():
+
+    clear_database()
+
+    return {
+        "message": "Route database cleared."
     }

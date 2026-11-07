@@ -1,4 +1,6 @@
 
+import asyncio
+
 from dataclasses import dataclass, field
 
 from dummy_valhalla import (
@@ -6,61 +8,98 @@ from dummy_valhalla import (
     generate_route,
 )
 
-from dummy_database import (
+from dummy_ticket_db import (
     delivery_ticket,
     get_all_tickets,
 )
 
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+
 MAXIMUM_NODE_SIZE = 3600  # Seconds (1 hour)
-MAXIMUM_DESTINATION_TIME = 15.0  # Minutes
+MAXIMUM_DESTINATION_TIME = 30.0  # Minutes
 
 
-@dataclass
-class location_cluster:
-    cluster_type: str
-    locations: list[location_node] = field(default_factory=list)
-    ticket_ids: list[str] = field(default_factory=list)
-    total_time: float = 0.0
-    maximum_size: float = MAXIMUM_NODE_SIZE
+# ==========================================
+# DATA STRUCTURES
+# ==========================================
 
 @dataclass
 class route_stop:
     location: dict
     order_id: str
+    is_pickup: bool
 
-async def destination_distance(a: dict, b: dict) -> float:
+
+@dataclass
+class location_cluster:
+    cluster_type: str
+    locations: list[route_stop] = field(default_factory=list)
+    total_time: float = 0.0
+    maximum_size: float = MAXIMUM_NODE_SIZE
+
+
+# ==========================================
+# ROUTE CALCULATION CACHE
+# ==========================================
+
+_route_cache: dict[tuple, float] = {}
+
+
+def location_key(location: dict) -> tuple:
+    return (
+        round(float(location["lat"]), 6),
+        round(float(location["lon"]), 6)
+    )
+
+
+async def get_route_time(locations: list[dict]) -> float:
     """
-    Get Valhalla travel time between two destinations.
+    Calculate an entire route in one Valhalla request.
     Returns minutes.
-    """
-
-    result = await generate_route([a, b])
-
-    return float(result["route_time"])
-
-
-async def calculate_route_time(locations: list[dict]) -> float:
-    """
-    Calculate total journey time across consecutive locations.
-    Returns seconds.
     """
 
     if len(locations) < 2:
         return 0.0
 
-    total_time_seconds = 0.0
+    key = tuple(location_key(loc) for loc in locations)
 
-    for index in range(len(locations) - 1):
+    if key not in _route_cache:
+        result = await generate_route(locations)
+        _route_cache[key] = float(result["route_time"])
 
-        result = await generate_route([
-            locations[index],
-            locations[index + 1]
-        ])
+    return _route_cache[key]
 
-        total_time_seconds += float(result["route_time"]) * 60.0
 
-    return total_time_seconds
+async def destination_distance(a: dict, b: dict) -> float:
+    """Get Valhalla travel time between destinations in minutes."""
 
+    return await get_route_time([a, b])
+
+
+async def calculate_route_time(locations: list[dict]) -> float:
+    """Calculate total journey time in seconds."""
+
+    return await get_route_time(locations) * 60.0
+
+
+async def get_destination_distances(
+    destinations: list[dict],
+    target: dict
+) -> list[float]:
+    """Calculate destination distances concurrently."""
+
+    return await asyncio.gather(*[
+        destination_distance(destination, target)
+        for destination in destinations
+    ])
+
+
+# ==========================================
+# CLUSTER GENERATION
+# ==========================================
 
 async def defineClusters(
     route_pool: list[delivery_ticket],
@@ -75,7 +114,6 @@ async def defineClusters(
 
     for ticket in route_pool:
 
-        # Extract location_node from delivery_ticket.
         node = ticket.locations
 
         if node.node_type not in ("pickup", "dropoff"):
@@ -84,47 +122,75 @@ async def defineClusters(
         if node.origin is None or node.destination is None:
             continue
 
-        matching_clusters = []
+        # Create pickup and delivery stops.
+        pickup_stop = route_stop(
+            location=node.origin,
+            order_id=ticket.ticket_id,
+            is_pickup=True
+        )
 
-        for cluster in clusters:
+        delivery_stop = route_stop(
+            location=node.destination,
+            order_id=ticket.ticket_id,
+            is_pickup=False
+        )
 
-            if cluster.cluster_type != node.node_type:
-                continue
+        # Find compatible clusters.
+        candidate_clusters = [
+            cluster for cluster in clusters
+            if cluster.cluster_type == node.node_type
+        ]
 
-            if not cluster.locations:
-                continue
+        async def check_cluster(cluster):
 
-            distances = [
-                await destination_distance(
-                    existing.destination,
-                    node.destination
-                )
-                for existing in cluster.locations
+            existing_destinations = [
+                stop.location
+                for stop in cluster.locations
+                if not stop.is_pickup
             ]
+
+            if not existing_destinations:
+                return None
+
+            distances = await get_destination_distances(
+                existing_destinations,
+                node.destination
+            )
 
             if all(
                 distance <= maximum_destination_distance
                 for distance in distances
             ):
-                matching_clusters.append(
-                    (cluster, max(distances, default=0.0))
-                )
+                return cluster, max(distances)
+
+            return None
+
+        results = await asyncio.gather(*[
+            check_cluster(cluster)
+            for cluster in candidate_clusters
+        ])
+
+        matching_clusters = [
+            result for result in results
+            if result is not None
+        ]
 
         matching_clusters.sort(key=lambda item: item[1])
 
         added = False
 
+        # Try adding to existing clusters.
         for cluster, _destination_score in matching_clusters:
 
-            proposed_nodes = cluster.locations + [node]
+            proposed_stops = (
+                cluster.locations +
+                [pickup_stop, delivery_stop]
+            )
 
-            proposed_route = []
-
-            for existing in proposed_nodes:
-                proposed_route.extend([
-                    existing.origin,
-                    existing.destination
-                ])
+            proposed_route = [
+                stop.location
+                for stop in proposed_stops
+            ]
 
             proposed_time = await calculate_route_time(
                 proposed_route
@@ -132,13 +198,17 @@ async def defineClusters(
 
             if proposed_time <= maximum_size:
 
-                cluster.locations.append(node)
-                cluster.ticket_ids.append(ticket.ticket_id)
+                cluster.locations.extend([
+                    pickup_stop,
+                    delivery_stop
+                ])
+
                 cluster.total_time = proposed_time
 
                 added = True
                 break
 
+        # Create a new cluster if necessary.
         if not added:
 
             initial_time = await calculate_route_time([
@@ -149,15 +219,21 @@ async def defineClusters(
             clusters.append(
                 location_cluster(
                     cluster_type=node.node_type,
-                    locations=[node],
-                    ticket_ids=[ticket.ticket_id],
+                    locations=[
+                        pickup_stop,
+                        delivery_stop
+                    ],
                     total_time=initial_time,
-                    maximum_size=maximum_size,
+                    maximum_size=maximum_size
                 )
             )
 
     return clusters
 
+
+# ==========================================
+# ROUTE GENERATION FROM CLUSTERS
+# ==========================================
 
 async def routes_from_clusters(
     courier: location_node,
@@ -165,121 +241,107 @@ async def routes_from_clusters(
 ) -> list[route_stop]:
 
     if courier.origin is None or courier.destination is None:
-        raise ValueError("Courier must have an origin and destination")
+        raise ValueError(
+            "Courier must have an origin and destination"
+        )
 
-    # ------------------------------------------
-    # 1. EXTRACT ALL ROUTE STOPS
-    # ------------------------------------------
-
+    # Extract all route stops.
     stops: list[route_stop] = []
 
     for cluster in cluster_pool:
-
-        if len(cluster.locations) != len(cluster.ticket_ids):
-            raise ValueError(
-                "Cluster locations and ticket IDs are mismatched"
-            )
-
-        for node, order_id in zip(
-            cluster.locations,
-            cluster.ticket_ids
-        ):
-
-            if node.origin is not None:
-                stops.append(
-                    route_stop(
-                        location=node.origin,
-                        order_id=order_id
-                    )
-                )
-
-            if node.destination is not None:
-                stops.append(
-                    route_stop(
-                        location=node.destination,
-                        order_id=order_id
-                    )
-                )
+        stops.extend(cluster.locations)
 
     if not stops:
         return []
 
-    # ------------------------------------------
-    # 2. ROUTE TIME HELPER
-    # ------------------------------------------
+    # Remove duplicate stops by order and pickup type.
+    unique_stops = {}
+    for stop in stops:
+        key = (stop.order_id, stop.is_pickup)
+        unique_stops[key] = stop
 
-    route_cache: dict[tuple, float] = {}
+    stops = list(unique_stops.values())
 
-    async def get_travel_time(locations: list[dict]) -> float:
+    # Validate that every order has exactly one pickup
+    # and one delivery.
+    order_pickups = {
+        stop.order_id
+        for stop in stops
+        if stop.is_pickup
+    }
 
-        key = tuple(
-            (loc["lat"], loc["lon"])
-            for loc in locations
+    order_deliveries = {
+        stop.order_id
+        for stop in stops
+        if not stop.is_pickup
+    }
+
+    if order_pickups != order_deliveries:
+        raise ValueError(
+            "Every order must have exactly one pickup "
+            "and one delivery."
         )
 
-        if key not in route_cache:
-
-            result = await generate_route(locations)
-
-            # Dummy Valhalla returns minutes.
-            route_cache[key] = float(result["route_time"])
-
-        return route_cache[key]
-
-    # ------------------------------------------
-    # 3. FIND THE BEST FIRST STOP
-    # ------------------------------------------
-
+    # Order stops with pickup precedence.
     remaining = stops.copy()
     ordered_stops: list[route_stop] = []
 
     current_location = courier.origin
+    picked_up: set[str] = set()
 
     while remaining:
 
-        best_stop = None
-        best_score = float("inf")
+        eligible_stops = [
+            stop
+            for stop in remaining
+            if stop.is_pickup or stop.order_id in picked_up
+        ]
 
-        for candidate in remaining:
+        if not eligible_stops:
+            raise ValueError(
+                "Unable to order route: delivery has no preceding pickup"
+            )
 
-            # Calculate the route:
-            # Current location -> candidate -> courier destination.
-            #
-            # This encourages the algorithm to select stops
-            # that are both accessible and directionally useful.
+        async def evaluate_candidate(candidate):
 
-            score = await get_travel_time([
+            travel_time = await get_route_time([
                 current_location,
+                candidate.location
+            ])
+
+            onward_time = await get_route_time([
                 candidate.location,
                 courier.destination
             ])
 
-            if score < best_score:
-                best_score = score
-                best_stop = candidate
+            return travel_time + onward_time
 
-        # Add the best candidate.
+        scores = await asyncio.gather(*[
+            evaluate_candidate(candidate)
+            for candidate in eligible_stops
+        ])
+
+        best_index = min(
+            range(len(scores)),
+            key=lambda index: scores[index]
+        )
+
+        best_stop = eligible_stops[best_index]
+
         ordered_stops.append(best_stop)
-
         remaining.remove(best_stop)
+
+        if best_stop.is_pickup:
+            picked_up.add(best_stop.order_id)
 
         current_location = best_stop.location
 
-    # ------------------------------------------
-    # 4. VALIDATE THE COMPLETED ROUTE
-    # ------------------------------------------
-
+    # Validate the completed route.
     complete_route = [
-        courier.origin
-    ]
-
-    complete_route.extend(
-        stop.location for stop in ordered_stops
-    )
-
-    complete_route.append(
+        courier.origin,
+        *[stop.location for stop in ordered_stops],
         courier.destination
-    )
+    ]
 
     final_route = await generate_route(complete_route)
 
@@ -297,10 +359,26 @@ async def routes_from_clusters(
 # ==========================================
 
 async def defineClustersFromDatabase() -> list[location_cluster]:
-    """
-    Retrieve all existing delivery tickets and cluster them.
-    """
+    """Retrieve all tickets and generate clusters."""
 
     tickets = get_all_tickets()
 
     return await defineClusters(tickets)
+
+
+# ==========================================
+# CACHE MANAGEMENT
+# ==========================================
+
+def clear_route_cache():
+    """Clear cached Valhalla calculations."""
+
+    _route_cache.clear()
+
+
+def get_route_cache_stats() -> dict:
+    """Get route cache statistics."""
+
+    return {
+        "cached_routes": len(_route_cache)
+    }

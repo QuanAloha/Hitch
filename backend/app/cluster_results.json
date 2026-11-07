@@ -1,0 +1,151 @@
+[
+    {
+        "cluster_type": "pickup",
+        "total_time": 3120.6,
+        "maximum_size": 3600,
+        "locations": [
+            {
+                "order_id": "231660d4-35e9-40e8-bc4c-a701cd634a68",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.776731,
+                    "lon": -111.946749
+                }
+            },
+            {
+                "order_id": "231660d4-35e9-40e8-bc4c-a701cd634a68",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.733004,
+                    "lon": -111.920983
+                }
+            },
+            {
+                "order_id": "578c6f51-ad9c-4dc0-aafc-10e751b45c2e",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.788377,
+                    "lon": -111.862029
+                }
+            },
+            {
+                "order_id": "578c6f51-ad9c-4dc0-aafc-10e751b45c2e",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.807062,
+                    "lon": -111.938698
+                }
+            },
+            {
+                "order_id": "593c4f44-e218-4fc9-b717-2aa278a4040b",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.750631,
+                    "lon": -111.946126
+                }
+            },
+            {
+                "order_id": "593c4f44-e218-4fc9-b717-2aa278a4040b",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.726237,
+                    "lon": -111.884304
+                }
+            }
+        ]
+    },
+    {
+        "cluster_type": "pickup",
+        "total_time": 3203.4,
+        "maximum_size": 3600,
+        "locations": [
+            {
+                "order_id": "2fba6e79-5a07-4132-b14a-9188561078f7",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.703184,
+                    "lon": -111.924151
+                }
+            },
+            {
+                "order_id": "2fba6e79-5a07-4132-b14a-9188561078f7",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.777986,
+                    "lon": -111.879158
+                }
+            },
+            {
+                "order_id": "4609c6ae-1884-4d50-8224-14dee59ea52b",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.726453,
+                    "lon": -111.873395
+                }
+            },
+            {
+                "order_id": "4609c6ae-1884-4d50-8224-14dee59ea52b",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.797132,
+                    "lon": -111.949155
+                }
+            },
+            {
+                "order_id": "3cb7f224-c6be-4682-84bd-c37598721af6",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.801699,
+                    "lon": -111.871516
+                }
+            },
+            {
+                "order_id": "3cb7f224-c6be-4682-84bd-c37598721af6",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.796855,
+                    "lon": -111.855135
+                }
+            }
+        ]
+    },
+    {
+        "cluster_type": "pickup",
+        "total_time": 2800.8,
+        "maximum_size": 3600,
+        "locations": [
+            {
+                "order_id": "8c8b7f30-eafb-4e86-97ef-a2e806994344",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.796698,
+                    "lon": -111.859242
+                }
+            },
+            {
+                "order_id": "8c8b7f30-eafb-4e86-97ef-a2e806994344",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.74083,
+                    "lon": -111.929788
+                }
+            },
+            {
+                "order_id": "6fa27bcd-00f9-4cfc-8947-b8d3d601c4c0",
+                "is_pickup": true,
+                "location": {
+                    "lat": 40.814866,
+                    "lon": -111.906243
+                }
+            },
+            {
+                "order_id": "6fa27bcd-00f9-4cfc-8947-b8d3d601c4c0",
+                "is_pickup": false,
+                "location": {
+                    "lat": 40.71113,
+                    "lon": -111.937427
+                }
+            }
+        ]
+    }
+]

@@ -5,7 +5,7 @@ import random
 import uuid
 from pathlib import Path
 
-from dummy_ticket_db import (
+from dummy_ticket_db  import (
     create_ticket,
     get_all_tickets,
     clear_database,
@@ -27,7 +27,7 @@ from pathing import (
 # CONFIGURATION
 # ==========================================
 
-NUMBER_OF_TICKETS = 100
+NUMBER_OF_TICKETS = 10
 
 # Salt Lake City metro coordinates
 LAT_MIN = 40.70
