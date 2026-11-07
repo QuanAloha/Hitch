@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: hitch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hitch}
+      POSTGRES_DB: hitch
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hitch"]
+      interval: 5s
+      retries: 10
+
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    ports: ["8002:8002"]
+    volumes:
+      - ./valhalla_data:/custom_files
+    environment:
+      tile_urls: ${OSM_PBF_URL}
+      use_tiles_ignore_pbf: "True"
+      force_rebuild: "False"
+      build_elevation: "False"
+      build_admins: "True"
+      build_time_zones: "False"
+      server_threads: "2"
+
+  # Named "backend" because frontend/vite.config.js proxies to http://backend:8000
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://hitch:${POSTGRES_PASSWORD:-hitch}@db:5432/hitch
+      VALHALLA_URL: http://valhalla:8002
+    depends_on:
+      db:
+        condition: service_healthy
+      valhalla:
+        condition: service_started
+    ports: ["8000:8000"]
+
+  frontend:
+    build: ./frontend
+    ports: ["5173:5173"]
+    depends_on: [backend]
+
+volumes:
+  pgdata:
