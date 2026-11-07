@@ -20,6 +20,7 @@ The frontend currently fills those gaps with hard-coded examples and browser `lo
 
 - **Traditional business shipper:** order ingestion and predicted shipments can come from the business integration/API. The backend assigns local pickup runs and their windows; the shipper sees what to have ready and when. Do not let this view choose a pickup window per order.
 - **Etsy and Facebook Marketplace sellers:** they create individual pickup requests with product, package count, packed dimensions, pickup address, destination, and a time window when the item is available. Return a request status immediately, then attach a driver/run/window when dispatch has assigned one.
+- **Etsy home shops:** they can also prepare a carrier batch containing multiple packed parcels, choose the carrier and destination post office/ship center, and provide one home pickup window. Dispatch may combine pickups from several Etsy sellers in one neighborhood and route the parcels together to the same carrier facility. A route can include local customer deliveries and carrier drop-offs alongside those pickups.
 - **Local vs. long-distance:** local independent drivers serve Logan, Tooele, Ogden, Park City, Salt Lake City, Lehi, and Provo. Long-distance/out-of-area orders should remain assigned to a parcel carrier or 3PL and be identified separately from local-driver work.
 - **Drivers:** an availability block references a saved vehicle. Capacity comes from the selected vehicle and is not entered as an arbitrary package count during availability scheduling.
 - **Route lock:** the backend is the source of truth. Lock a route 12 hours before the availability start and return the lock state and lock timestamp. The UI countdown/state is only a display of that server value.
@@ -85,6 +86,33 @@ Suggested create body:
 The response should return the request ID, status (for example, `awaiting_driver`, `assigned`, `picked_up`, `delivered`, `cancelled`), any assigned driver/run, and the confirmed pickup window. Keep a seller-provided availability window distinct from a backend-confirmed pickup window.
 
 Dimensions must be stored with units and passed into dispatch/capacity checks. A TV and a small handheld item must not be treated as interchangeable just because both are one package.
+
+### 2a. Etsy carrier batches
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /api/seller/carrier-batches` | Create a batch of Etsy parcels for a selected carrier and carrier drop-off facility. |
+| `GET /api/seller/carrier-batches` | List the seller's batches and their pickup/dispatch status. |
+| `GET /api/seller/carrier-batches/{batch_id}` | Refresh a batch after dispatch assigns its pickup. |
+
+Suggested create body:
+
+```json
+{
+  "source": "etsy",
+  "batch_name": "Friday shop orders",
+  "carrier": "usps",
+  "dropoff": { "facility_name": "Downtown Post Office", "address": "...", "lat": 40.768, "lon": -111.891 },
+  "pickup": { "address": "Home studio address", "lat": 40.73, "lon": -111.86 },
+  "available_window": { "start": "2026-11-07T09:00:00-07:00", "end": "2026-11-07T12:00:00-07:00" },
+  "packages": [
+    { "product_name": "Handmade mug", "dimensions": { "length": 10, "width": 8, "height": 7, "unit": "in" } },
+    { "product_name": "Ceramic vase", "dimensions": { "length": 14, "width": 10, "height": 10, "unit": "in" } }
+  ]
+}
+```
+
+Return the batch ID, package count, selected carrier/facility, status, and any assigned pickup window, driver, and route. Keep the seller's available window separate from the confirmed dispatch window. Treat the carrier drop-off as a route stop with type `carrier_dropoff` and coordinates. Dispatch owns consolidation: it can collect compatible batches from multiple nearby Etsy sellers, then make one stop at a shared post office or ship center. Include the batch/package IDs represented by each pickup and carrier-drop-off stop so drivers and sellers can see which parcels travel together. The seller selects the carrier and facility for their batch; the frontend does not build routes or choose which batches dispatch combines.
 
 ### 3. Driver vehicle garage and availability
 
@@ -173,6 +201,7 @@ Fuel suggestions are currently static frontend demo content. To show an actual c
 | --- | --- |
 | `shipperOrders`, `freightCycles` | Shipper orders, pickup runs, and freight summary endpoints |
 | `hitch-seller-pickup-requests` | Seller pickup-request endpoints |
+| `hitch-etsy-carrier-batches` | Etsy carrier-batch endpoints |
 | `hitch-driver-vehicle-garage` | Driver vehicle garage endpoints |
 | `hitch-driver-availability` | Driver availability and route endpoints |
 | `hitch-driver-route-progress` | Route start and stop-completion endpoints |
