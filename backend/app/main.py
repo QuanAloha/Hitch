@@ -1,17 +1,22 @@
 import os
 
-import httpx
 import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://hitch:hitch_dev_password@localhost:5432/hitch"
+from dummy_valhalla import (
+    generate_route,
+    get_stored_route,
+    initialize_database,
 )
-VALHALLA_URL = os.getenv("VALHALLA_URL", "http://localhost:8002").rstrip("/")
 
-app = FastAPI(title="Hitch API", version="0.1.0")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://hitch:hitch_dev_password@localhost:5432/hitch",
+)
+
+app = FastAPI(title="Hitch API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -20,10 +25,10 @@ app.add_middleware(
 )
 
 
-
 class RouteRequest(BaseModel):
     locations: list[dict] = Field(
         min_length=2,
+        max_length=2,
         examples=[
             [
                 {"lat": 40.7608, "lon": -111.891},
@@ -33,44 +38,10 @@ class RouteRequest(BaseModel):
     )
     costing: str = "auto"
 
-@app.post("/route")
-async def get_route(request: RouteRequest):
-    payload = {
-        "locations": request.locations,
-        "costing": request.costing,
-        "units": "miles",
-        "directions_type": "instructions",
-    }
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{VALHALLA_URL}/route",
-                json=payload,
-            )
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "message": "Valhalla routing failed",
-                    "valhalla_error": response.text,
-                },
-            )
-
-        return response.json()
-
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Valhalla routing request timed out",
-        )
-
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail="Could not connect to Valhalla",
-        )
+@app.on_event("startup")
+def startup():
+    initialize_database()
 
 
 @app.get("/")
@@ -93,13 +64,17 @@ def database_health():
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
 
 
+@app.post("/route")
 @app.post("/api/route")
-async def route(request: RouteRequest):
-    payload = {"locations": request.locations, "costing": request.costing}
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{VALHALLA_URL}/route", json=payload)
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="Valhalla routing request failed") from exc
+async def create_route(request: RouteRequest):
+    """
+    Calculate route through Valhalla, persist it in PostgreSQL,
+    and return its database ID and duration in minutes.
+    """
+    return await generate_route(request.locations, request.costing)
+
+
+@app.get("/route/{route_id}")
+@app.get("/api/route/{route_id}")
+def route_by_id(route_id: str):
+    return get_stored_route(route_id)
